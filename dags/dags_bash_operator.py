@@ -1,5 +1,5 @@
 
-from __future__ import annotations
+from airflow import DAG
 import datetime
 import pendulum
 
