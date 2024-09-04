@@ -16,9 +16,10 @@ with DAG(
     #params={"example_key": "example_value"},              ## DAG에서 사용하는 값 파라미터
 ) as dag:
     send_email = EmailOperator(
-        task_id='send_email_task'
-        to='ppy611@gmail.com'
-        subject='Airflow 성공 메일'
+        task_id='send_email_task',
+        to='ppy611@gmail.com',
+        subject='Airflow 성공 메일',
         html_content='Airflow 작업이 완료 되었습니다'
-
     )
+        
+    
