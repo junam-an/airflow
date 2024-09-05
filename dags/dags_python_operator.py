@@ -22,7 +22,7 @@ with DAG(
         print(fruit[rand_int])
 
     py_t1 = PythonOperator(
-        task_id='py_t1'               ## task name
+        task_id='py_t1',               ## task name
         python_callable=select_fruit  ## 실행 하고자 하는 파이썬 함수
     )
 
