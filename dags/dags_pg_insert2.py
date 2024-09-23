@@ -16,25 +16,6 @@ with DAG(
     #tags=["example", "example2"],                         ## 이름 아래 작게 출력 되는 태그 이름
     #params={"example_key": "example_value"},              ## DAG에서 사용하는 값 파라미터
 ) as dag:
-    def insrt_postgres(ip, port, dbname, user, passwd, **kwargs):
-        import psycopg2
-        from contextlib import closing
-        with closing(psycopg2.connect(host=ip, dbname=dbname, user=user, password=passwd, port=int(port))) as conn:
-            with closing(conn.cursor()) as cursor:
-                dag_id = 'test1'
-                task_id = 'test2'
-                run_id = 'test3'
-                msg = 'insrt 수행'
-                sql = 'insert into py_opr_drct_insrt values (%s,%s,%s,%s);'
-                cursor.execute(sql,(dag_id,task_id,run_id,msg))
-                conn.commit()
-
-    insrt_postgres = PythonOperator(
-        task_id='insrt_postgres',
-        python_callable=insrt_postgres,
-        op_args=['172.28.0.3', '5432', 'ajnam', 'ajnam', 'ajnam']
-    )
-
     def select_fruit():
         fruit = ['APPLE', 'BANANA', 'ORANGE', 'AVOCADO']
         rand_int = random.randint(0,3)
@@ -45,4 +26,4 @@ with DAG(
         python_callable=select_fruit  ## 실행 하고자 하는 파이썬 함수
     )
 
-    py_t1 >> insrt_postgres
+    py_t1
