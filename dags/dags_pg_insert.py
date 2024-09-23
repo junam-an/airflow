@@ -27,11 +27,11 @@ with DAG(
                 msg = 'insrt 수행'
                 sql = 'insert into py_opr_drct_insrt values (%s,%s,%s,%s);'
 
-            try:
+            #try:
                 cursor.execute(sql,(dag_id,task_id,run_id,msg))
                 conn.commit()
-            except Exception as e:
-                return str(e.message)
+            #except Exception as e:
+            #    return str(e.message)
 
     insrt_postgres = PythonOperator(
         task_id='insrt_postgres',
