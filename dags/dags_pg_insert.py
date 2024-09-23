@@ -29,9 +29,8 @@ with DAG(
                 cursor.execute(sql,(dag_id,task_id,run_id,msg))
                 conn.commit()
 
-
-    insrt_postgres = PythonOperator(
-        task_id='insrt_postgres',
+    pg_insert = PythonOperator(
+        task_id='pg_insert',
         python_callable=insrt_postgres,
         op_args=['localhost', '5432', 'ajnam', 'ajnam', 'ajnam']
     )
