@@ -35,4 +35,5 @@ with DAG(
         op_args=['localhost', '5432', 'ajnam', 'ajnam', 'ajnam']
     )
 
+
     pg_insert
