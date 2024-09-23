@@ -38,3 +38,5 @@ with DAG(
         python_callable=insrt_postgres,
         op_args=['172.28.0.3', '5432', 'ajnam', 'ajnam', 'ajnam']
     )
+
+    insrt_postgres
