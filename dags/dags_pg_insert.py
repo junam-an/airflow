@@ -26,7 +26,7 @@ with DAG(
                 run_id = kwargs.get('ti').run_id
                 msg = 'insrt 수행'
                 sql = 'insert into py_opr_drct_insrt values (%s,%s,%s,%s);'
-        for query in queries:
+        for query in sql:
             try:
                 cursor.execute(sql,(dag_id,task_id,run_id,msg))
                 conn.commit()
