@@ -31,7 +31,7 @@ with DAG(
                 cursor.execute(sql,(dag_id,task_id,run_id,msg))
                 conn.commit()
             except Exception as e:
-                print(str(e.message))
+                return str(e.message)
 
     insrt_postgres = PythonOperator(
         task_id='insrt_postgres',
