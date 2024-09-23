@@ -33,4 +33,16 @@ with DAG(
         task_id='insrt_postgres',
         python_callable=insrt_postgres,
         op_args=['172.28.0.3', '5432', 'ajnam', 'ajnam', 'ajnam']
-)
+    )
+
+    def select_fruit():
+    fruit = ['APPLE', 'BANANA', 'ORANGE', 'AVOCADO']
+    rand_int = random.randint(0,3)
+    print(fruit[rand_int])
+
+    py_t1 = PythonOperator(
+        task_id='py_t1',               ## task name
+        python_callable=select_fruit  ## 실행 하고자 하는 파이썬 함수
+    )
+
+    py_t1 >> insrt_postgres
