@@ -35,6 +35,7 @@ with DAG(
         target_postgres_hook = PostgresHook(target_postgres_conn_id)  # 타겟 DB pg hook 설정
         with closing(target_postgres_hook.get_conn()) as target_conn: # 타겟 DB 커넥션 수행
             with closing(target_conn.cursor()) as target_cursor: # 타겟 DB 커서 생성
+                    print("hook insert 수행")
                     for index, row in df.iterrows():             # 타겟 DB 에 데이터 insert
                         insert_query = f"""
                         INSERT INTO target_t ({', '.join(columns)}) 
