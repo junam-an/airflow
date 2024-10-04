@@ -21,15 +21,11 @@ with DAG(
 
         dag_id = kwargs.get('ti').dag_id
         task_id = kwargs.get('ti').task_id
-
         execution_date = kwargs.get('execution_date')
         run_id = kwargs.get('run_id')
 
-        print('execution_date: ' + str(execution_date))
-        print('run_id: ' + str(run_id))
-
         t1 = CustomPostgresHook()
-        t1.get_conn(dag_id=dag_id, task_id=task_id)
+        t1.get_conn(dag_id=dag_id, task_id=task_id, run_id=run_id, execute_id=execution_date)
 
         fruit = ['APPLE', 'BANANA', 'ORANGE', 'AVOCADO']
         rand_int = random.randint(0,3)
