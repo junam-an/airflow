@@ -31,8 +31,11 @@ class CustomPostgresHook(BaseHook):
                 sql = "insert into airflow_task_log values ('test','test', to_char(now(), 'YYYYMMDDHH24MISS'),NULL,NULL,to_char(now(), 'YYYYMMDDHH24MISS'));"
 
                 try:
+                    self.log.info(f'insert를 시작 합니다.')
                     conn.execute(sql)
                     conn.commit()
                 except:
                     self.log.info(f'insert 에 실패 하였습니다')
+        
+        return self.conn
         
