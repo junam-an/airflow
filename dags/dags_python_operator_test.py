@@ -9,12 +9,15 @@ from common.common_execute_pre import CustomPostgresHook
 
 log_write_pre = CustomPostgresHook()
 
-#def outer_func(target_func):
-#  def inner_func():
-#    print('target 함수 실행 전 입니다.')
-#    target_func()
-#    print('target 함수 실행 후 입니다.')
-#  return inner_func
+
+
+def outer_func(**kwargs):
+  def inner_func():
+    print('target 함수 실행 전 입니다.')
+    print(kwargs.get('ti').dag_id)
+    print(kwargs.get('ti').task_id)
+    print('target 함수 실행 후 입니다.')
+  return inner_func
 
 
 
@@ -28,7 +31,7 @@ with DAG(
     #tags=["example", "example2"],                         ## 이름 아래 작게 출력 되는 태그 이름
     #params={"example_key": "example_value"},              ## DAG에서 사용하는 값 파라미터
 ) as dag:
- #   @outer_func
+    @outer_func
     def select_fruit(**kwargs):
 
         dag_id = kwargs.get('ti').dag_id
