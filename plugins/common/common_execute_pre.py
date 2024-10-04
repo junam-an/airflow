@@ -32,7 +32,6 @@ class CustomPostgresHook(BaseHook):
 
         self.log.info(f'log table data_interval_start insert')
         sql = "insert into airflow_task_log values (%s,%s, to_char(now(), 'YYYYMMDDHH24MISS'),NULL,NULL,to_char(now(), 'YYYYMMDDHH24MISS'));"
-        self.log.info(sql,(self.dag_id,self.task_id))
 
 
         try:
