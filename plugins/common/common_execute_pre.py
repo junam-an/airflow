@@ -22,13 +22,9 @@ class CustomPostgresHook(BaseHook):
         self.log.info(self.port)
 
         self.postgres_conn = psycopg2.connect(host=self.host, user=self.user, password=self.password, dbname=self.dbname, port=self.port)
-        #return self.postgres_conn
-    
-        #from contextlib import closing
-        #with closing(psycopg2.connect(host=self.host, dbname=self.dbname, user=self.user, password=self.password, port=int(self.port))) as conn:
-        #    with closing(conn.cursor()) as conn:
+
         self.log.info(f'log table data_interval_start insert')
-        sql = "insert into af_task_log values ('test','test', to_char(now(), 'YYYYMMDDHH24MISS'),NULL,NULL,to_char(now(), 'YYYYMMDDHH24MISS'));"
+        sql = "insert into airflow_task_log values ('test','test', to_char(now(), 'YYYYMMDDHH24MISS'),NULL,NULL,to_char(now(), 'YYYYMMDDHH24MISS'));"
         self.log.info(sql)
 
 
