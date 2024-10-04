@@ -17,7 +17,7 @@ with DAG(
     #tags=["example", "example2"],                         ## 이름 아래 작게 출력 되는 태그 이름
     #params={"example_key": "example_value"},              ## DAG에서 사용하는 값 파라미터
 ) as dag:
-    def select_fruit(dag_name, task_name, **kwargs):
+    def select_fruit(**kwargs):
 
         dag_id = kwargs.get('ti').dag_id
         task_id = kwargs.get('ti').task_id
