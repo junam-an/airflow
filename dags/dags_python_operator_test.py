@@ -21,8 +21,8 @@ with DAG(
 
         dag_id = kwargs.get('ti').dag_id
         task_id = kwargs.get('ti').task_id
-        execution_date = kwargs.get('execution_date')
-        run_id = kwargs.get('run_id')
+        execution_date = str(kwargs.get('execution_date'))
+        run_id = str(kwargs.get('run_id'))
 
         t1 = CustomPostgresHook()
         t1.get_conn(dag_id=dag_id, task_id=task_id, run_id=run_id, execute_id=execution_date)
