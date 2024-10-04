@@ -6,7 +6,7 @@ class CustomPostgresHook(BaseHook):
     def __init__(self, **kwargs):
         self.postgres_conn_id = 'conn-db-postgres-custom'
 
-    def get_conn(self):
+    def get_conn(self, dag_id, task_id):
         airflow_conn = BaseHook.get_connection(self.postgres_conn_id)
         self.host = airflow_conn.host
         self.user = airflow_conn.login

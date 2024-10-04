@@ -17,9 +17,13 @@ with DAG(
     #tags=["example", "example2"],                         ## 이름 아래 작게 출력 되는 태그 이름
     #params={"example_key": "example_value"},              ## DAG에서 사용하는 값 파라미터
 ) as dag:
-    def select_fruit():
+    def select_fruit(dag_name, task_name, **kwargs):
+
+        dag_id = kwargs.get('ti').dag_id
+        task_id = kwargs.get('ti').task_id
+
         t1 = CustomPostgresHook()
-        t1.get_conn()
+        t1.get_conn(dag_id=dag_id, task_id=task_id)
 
         fruit = ['APPLE', 'BANANA', 'ORANGE', 'AVOCADO']
         rand_int = random.randint(0,3)
