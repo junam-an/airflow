@@ -22,14 +22,8 @@ with DAG(
         dag_id = kwargs.get('ti').dag_id
         task_id = kwargs.get('ti').task_id
 
-        print(kwargs)
-
-        #print(execution_date)
-        #print(f"Task ID: {kwargs['task_instance'].task_id}")
-        #print(f"Execution Date: {kwargs['execution_date']}")
-        #print(f"Run ID: {kwargs['run_id']}")
-        #print(f"Previous Execution Date: {kwargs['prev_execution_date']}")
-        #print(f"Next Execution Date: {kwargs['next_execution_date']}")
+        execution_date = kwargs.get('execution_date')
+        print(str(execution_date))
 
         t1 = CustomPostgresHook()
         t1.get_conn(dag_id=dag_id, task_id=task_id)
