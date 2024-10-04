@@ -21,9 +21,10 @@ with DAG(
 
         dag_id = kwargs.get('ti').dag_id
         task_id = kwargs.get('ti').task_id
-        execution_date = kwargs['execution_date']
         
-        print(execution_date)
+        print(kwargs)
+
+        #print(execution_date)
         #print(f"Task ID: {kwargs['task_instance'].task_id}")
         #print(f"Execution Date: {kwargs['execution_date']}")
         #print(f"Run ID: {kwargs['run_id']}")
