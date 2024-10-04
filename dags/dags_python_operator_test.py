@@ -7,6 +7,17 @@ import random
 from airflow.operators.python import PythonOperator
 from common.common_execute_pre import CustomPostgresHook
 
+log_write_pre = CustomPostgresHook()
+
+def outer_func(target_func):
+  def inner_func():
+    print('target 함수 실행 전 입니다.')
+    target_func()
+    print('target 함수 실행 후 입니다.')
+  return inner_func
+
+
+
 ###### DAG 설정 코드
 with DAG(
     dag_id="dags_python_operator_test",                           ## DAG 이름 8080 포트 콘솔화면에서 출력되는 이름, .py 파일 이름과 일치 시키기를 권장
@@ -17,6 +28,7 @@ with DAG(
     #tags=["example", "example2"],                         ## 이름 아래 작게 출력 되는 태그 이름
     #params={"example_key": "example_value"},              ## DAG에서 사용하는 값 파라미터
 ) as dag:
+    @outer_func
     def select_fruit(**kwargs):
 
         dag_id = kwargs.get('ti').dag_id
@@ -24,8 +36,7 @@ with DAG(
         execution_date = str(kwargs.get('execution_date'))
         run_id = str(kwargs.get('run_id'))
 
-        t1 = CustomPostgresHook()
-        t1.get_conn(dag_id=dag_id, task_id=task_id, run_id=run_id, execute_id=execution_date)
+        log_write_pre.get_conn(dag_id=dag_id, task_id=task_id, run_id=run_id, execute_id=execution_date)
 
         fruit = ['APPLE', 'BANANA', 'ORANGE', 'AVOCADO']
         rand_int = random.randint(0,3)
