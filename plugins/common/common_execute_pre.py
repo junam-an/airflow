@@ -28,7 +28,7 @@ class CustomPostgresHook(BaseHook):
         with closing(psycopg2.connect(host=self.host, dbname=self.dbname, user=self.user, password=self.password, port=int(self.port))) as conn:
             with closing(conn.cursor()) as conn:
                 self.log.info(f'log table data_interval_start insert')
-                sql = "insert into airflow_task_log values ('test','test', to_char(now(), 'YYYYMMDDHH24MISS'),NULL,NULL,to_char(now(), 'YYYYMMDDHH24MISS'));"
+                sql = "insert into af_task_log values ('test','test', to_char(now(), 'YYYYMMDDHH24MISS'),NULL,NULL,to_char(now(), 'YYYYMMDDHH24MISS'));"
                 self.log.info(sql)
 
 
