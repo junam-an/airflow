@@ -24,7 +24,11 @@ def outer_func(target_func):
       log_table_write.get_conn_pre(dag_id=dag_id, task_id=task_id, run_id=run_id, execute_id=execution_date, task_state='E', err_msg=str(e)[0:4000])
       raise
 
-    target_func()
+    try:
+      target_func()
+    except Exception as e:
+      log_table_write.get_conn_post(dag_id=dag_id, task_id=task_id, run_id=run_id, execute_id=execution_date, task_state='E', err_msg=str(e)[0:4000])
+      raise
 
     try:
       log_table_write.get_conn_post(dag_id=dag_id, task_id=task_id, run_id=run_id, execute_id=execution_date, task_state='S', err_msg='')
@@ -48,13 +52,11 @@ with DAG(
     @outer_func
     def select_fruit(**kwargs):
         ##### business logic 수행
-        try:
-          fruit = ['APPLE', 'BANANA', 'ORANGE', 'AVOCADO']
-          rand_int = random.randint(0,3)
-          print(fruit[rand_int])
-        except Exception as e:
-          raise
-         ##### business logic 종료
+        fruit = ['APPLE', 'BANANA', 'ORANGE', 'AVOCADO']
+        rand_int = random.randint(0,3)
+        print(fruit[rand_int])
+        raise Exception("Intentional Failure")
+        ##### business logic 종료
 
 
     py_t1 = PythonOperator(
