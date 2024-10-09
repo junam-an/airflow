@@ -8,7 +8,7 @@ from airflow.operators.python import PythonOperator
 
 
 def outer_func(target_func, **kwargs):
-  def inner_func():
+  def inner_func(**kwargs):
     print('target 함수 실행 전 입니다.')
     from common.common_execute_pre import CustomPostgresHook
     log_table_write = CustomPostgresHook()
