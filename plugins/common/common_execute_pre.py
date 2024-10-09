@@ -84,7 +84,7 @@ class CustomPostgresHook(BaseHook):
         try:
             self.log.info(f'log table update를 시작 합니다.')
             cursor = self.postgres_conn.cursor()
-            cursor.execute(sql,(self.dag_id, self.task_id, self.run_id, self.excute_id, self.task_state))
+            cursor.execute(sql,(self.task_state, self.dag_id, self.task_id, self.run_id, self.excute_id))
             self.postgres_conn.commit()
         except:
             self.log.info(f'log table update에 실패 하였습니다')
