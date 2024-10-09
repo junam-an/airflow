@@ -29,13 +29,14 @@ with DAG(
 
         print(f'시작 state : ' + state)
 
-        log_table_write.get_conn_pre(dag_id=dag_id, task_id=task_id, run_id=run_id, execute_id=execution_date)
+        log_table_write.get_conn_pre(dag_id=dag_id, task_id=task_id, run_id=run_id, execute_id=execution_date, task_state='R')
 
-        fruit = ['APPLE', 'BANANA', 'ORANGE', 'AVOCADO']
-        rand_int = random.randint(0,3)
-        print(fruit[rand_int])
-
-        log_table_write.get_conn_post(dag_id=dag_id, task_id=task_id, run_id=run_id, execute_id=execution_date)
+        try:
+          fruit = ['APPLE', 'BANANA', 'ORANGE', 'AVOCADO']
+          rand_int = random.randint(0,3)
+          print(fruit[rand_int])
+        except:
+          log_table_write.get_conn_post(dag_id=dag_id, task_id=task_id, run_id=run_id, execute_id=execution_date, task_state='E')
 
         print(f'끝 state : ' + state)
 

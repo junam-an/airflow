@@ -6,7 +6,7 @@ class CustomPostgresHook(BaseHook):
     def __init__(self, **kwargs):
         self.postgres_conn_id = 'conn-db-postgres-custom'
 
-    def get_conn_pre(self, dag_id, task_id, run_id, execute_id):
+    def get_conn_pre(self, dag_id, task_id, run_id, execute_id, task_state):
         airflow_conn = BaseHook.get_connection(self.postgres_conn_id)
         self.host = airflow_conn.host
         self.user = airflow_conn.login
@@ -18,6 +18,7 @@ class CustomPostgresHook(BaseHook):
         self.task_id = task_id
         self.run_id = run_id
         self.excute_id = execute_id
+        self.task_state = task_state
 
         self.log.info(self.postgres_conn_id)
         self.log.info(self.host)
@@ -31,13 +32,13 @@ class CustomPostgresHook(BaseHook):
         self.postgres_conn = psycopg2.connect(host=self.host, user=self.user, password=self.password, dbname=self.dbname, port=self.port)
 
         self.log.info(f'log table task_log insert')
-        sql = "insert into airflow_task_log values (%s,%s, %s, %s, to_char(now(), 'YYYYMMDDHH24MISS'),NULL,'R',to_char(now(), 'YYYYMMDDHH24MISS'));"
+        sql = "insert into airflow_task_log values (%s,%s, %s, %s, to_char(now(), 'YYYYMMDDHH24MISS'),NULL,%s,to_char(now(), 'YYYYMMDDHH24MISS'));"
 
 
         try:
             self.log.info(f'log table insert를 시작 합니다.')
             cursor = self.postgres_conn.cursor()
-            cursor.execute(sql,(self.dag_id, self.task_id, self.run_id, self.excute_id))
+            cursor.execute(sql,(self.dag_id, self.task_id, self.run_id, self.excute_id, self.task_state))
             self.postgres_conn.commit()
         except:
             self.log.info(f'log table insert 에 실패 하였습니다')
@@ -45,7 +46,7 @@ class CustomPostgresHook(BaseHook):
         return True
     
 
-    def get_conn_post(self, dag_id, task_id, run_id, execute_id):
+    def get_conn_post(self, dag_id, task_id, run_id, execute_id, task_state):
         airflow_conn = BaseHook.get_connection(self.postgres_conn_id)
         self.host = airflow_conn.host
         self.user = airflow_conn.login
@@ -57,6 +58,7 @@ class CustomPostgresHook(BaseHook):
         self.task_id = task_id
         self.run_id = run_id
         self.excute_id = execute_id
+        self.task_state = task_state
 
         self.log.info(self.postgres_conn_id)
         self.log.info(self.host)
@@ -70,10 +72,9 @@ class CustomPostgresHook(BaseHook):
         self.postgres_conn = psycopg2.connect(host=self.host, user=self.user, password=self.password, dbname=self.dbname, port=self.port)
 
         self.log.info(f'log table task_log update')
-        #sql = "insert into airflow_task_log values (%s,%s, %s, %s, to_char(now(), 'YYYYMMDDHH24MISS'),NULL,'R',to_char(now(), 'YYYYMMDDHH24MISS'));"
         sql = "update airflow_task_log \
                 set task_end_time = to_char(now(), 'YYYYMMDDHH24MISS') \
-                    ,task_status = 'C' \
+                    ,task_status = %s \
                 where 1=1 \
                 and dag_name = %s \
                 and task_name = %s \
@@ -83,7 +84,7 @@ class CustomPostgresHook(BaseHook):
         try:
             self.log.info(f'log table update를 시작 합니다.')
             cursor = self.postgres_conn.cursor()
-            cursor.execute(sql,(self.dag_id, self.task_id, self.run_id, self.excute_id))
+            cursor.execute(sql,(self.dag_id, self.task_id, self.run_id, self.excute_id, self.task_state))
             self.postgres_conn.commit()
         except:
             self.log.info(f'log table update에 실패 하였습니다')
