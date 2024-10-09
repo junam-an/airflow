@@ -21,13 +21,13 @@ class CustomPostgresHook(BaseHook):
         self.task_state = task_state
 
         self.log.info(self.postgres_conn_id)
-        self.log.info(self.host)
-        self.log.info(self.user)
-        self.log.info(self.password)
-        self.log.info(self.dbname)
-        self.log.info(self.port)
-        self.log.info(self.dag_id)
-        self.log.info(self.task_id)
+        #self.log.info(self.host)
+        #self.log.info(self.user)
+        #self.log.info(self.password)
+        #self.log.info(self.dbname)
+        #self.log.info(self.port)
+        #self.log.info(self.dag_id)
+        #self.log.info(self.task_id)
 
         self.postgres_conn = psycopg2.connect(host=self.host, user=self.user, password=self.password, dbname=self.dbname, port=self.port)
 
@@ -61,13 +61,13 @@ class CustomPostgresHook(BaseHook):
         self.task_state = task_state
 
         self.log.info(self.postgres_conn_id)
-        self.log.info(self.host)
-        self.log.info(self.user)
-        self.log.info(self.password)
-        self.log.info(self.dbname)
-        self.log.info(self.port)
-        self.log.info(self.dag_id)
-        self.log.info(self.task_id)
+        #self.log.info(self.host)
+        #self.log.info(self.user)
+        #self.log.info(self.password)
+        #self.log.info(self.dbname)
+        #self.log.info(self.port)
+        #self.log.info(self.dag_id)
+        #self.log.info(self.task_id)
 
         self.postgres_conn = psycopg2.connect(host=self.host, user=self.user, password=self.password, dbname=self.dbname, port=self.port)
 
