@@ -7,7 +7,7 @@ import random
 from airflow.operators.python import PythonOperator
 
 
-def outer_func(target_func, **kwargs):
+def outer_func(target_func):
   def inner_func(**kwargs):
     from common.common_execute_pre import CustomPostgresHook
     log_table_write = CustomPostgresHook()
@@ -64,9 +64,14 @@ with DAG(
     )
 
     @outer_func
-    @task(task_id='py_t2')
     def test_1(**kwargs):
       print('TEST JOB')
 
+    py_t2 = PythonOperator(
+        task_id='py_t2',               ## task name
+        python_callable=test_1,  ## 실행 하고자 하는 파이썬 함수
+        op_kwargs={}
+    )
 
-    py_t1 >> test_1()
+
+    py_t1 >> py_t2
