@@ -73,6 +73,7 @@ class CustomPostgresHook(BaseHook):
         #sql = "insert into airflow_task_log values (%s,%s, %s, %s, to_char(now(), 'YYYYMMDDHH24MISS'),NULL,'R',to_char(now(), 'YYYYMMDDHH24MISS'));"
         sql = "update airflow_task_log \
                 set task_end_time = to_char(now(), 'YYYYMMDDHH24MISS') \
+                    ,task_status = 'C' \
                 where 1=1 \
                 and dag_name = %s \
                 and task_name = %s \

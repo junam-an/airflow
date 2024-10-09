@@ -25,6 +25,9 @@ with DAG(
         task_id = kwargs.get('ti').task_id
         execution_date = str(kwargs.get('execution_date'))
         run_id = str(kwargs.get('run_id'))
+        state = kwargs.get('ti').state
+
+        print(f'시작 state : ' + state)
 
         log_table_write.get_conn_pre(dag_id=dag_id, task_id=task_id, run_id=run_id, execute_id=execution_date)
 
@@ -33,6 +36,8 @@ with DAG(
         print(fruit[rand_int])
 
         log_table_write.get_conn_post(dag_id=dag_id, task_id=task_id, run_id=run_id, execute_id=execution_date)
+
+        print(f'끝 state : ' + state)
 
     py_t1 = PythonOperator(
         task_id='py_t1',               ## task name
