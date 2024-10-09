@@ -68,6 +68,5 @@ with DAG(
     def test_1(**kwargs):
       print('TEST JOB')
 
-    py_t2 = test_1()
 
-    py_t1 >> py_t2
+    py_t1 >> test_1()
