@@ -17,8 +17,10 @@ def outer_func(target_func):
     execution_date = str(kwargs.get('execution_date'))
     run_id = str(kwargs.get('run_id'))
     state = kwargs.get('ti').state
-    trigger_rule = kwargs.get('ti').trigger_rule
+    trigger_rule = kwargs.get('task').trigger_rule
+    Operator = kwargs.get('ti').operator
     print(f'트리거 룰 :' + trigger_rule)
+    print(f'오퍼레이터 :' + Operator)
 
     try:
       log_table_write.get_conn_pre(dag_id=dag_id, task_id=task_id, run_id=run_id, execute_id=execution_date, task_state='R', err_msg='')
