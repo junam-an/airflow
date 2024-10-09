@@ -38,7 +38,7 @@ with DAG(
           raise Exception("Intentional Failure")
         except:
           log_table_write.get_conn_post(dag_id=dag_id, task_id=task_id, run_id=run_id, execute_id=execution_date, task_state='E')
-          #raise Exception("Task failed due to some error")
+          raise  # 예외를 다시 발생시켜 Airflow에서 실패로 처리
 
         print(f'끝 state : ' + state)
 
