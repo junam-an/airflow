@@ -19,13 +19,11 @@ def outer_func(target_func):
     state = kwargs.get('ti').state
     trigger_rule = kwargs.get('task').trigger_rule
     Operator = kwargs.get('ti').operator
-    print(f'트리거 룰 :' + trigger_rule)
-    print(f'오퍼레이터 :' + Operator)
 
     try:
-      log_table_write.get_conn_pre(dag_id=dag_id, task_id=task_id, run_id=run_id, execute_id=execution_date, task_state='R', err_msg='')
+      log_table_write.get_conn_pre(dag_id=dag_id, task_id=task_id, run_id=run_id, execute_id=execution_date, task_state='R', err_msg='', trigger_rule=trigger_rule, task_type=Operator)
     except Exception as e:
-      log_table_write.get_conn_pre(dag_id=dag_id, task_id=task_id, run_id=run_id, execute_id=execution_date, task_state='E', err_msg=str(e)[0:4000])
+      log_table_write.get_conn_pre(dag_id=dag_id, task_id=task_id, run_id=run_id, execute_id=execution_date, task_state='E', err_msg=str(e)[0:4000], trigger_rule=trigger_rule, task_type=Operator)
       raise
 
     try:
