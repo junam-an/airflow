@@ -62,7 +62,8 @@ with DAG(
     py_t1 = PythonOperator(
         task_id='py_t1',               ## task name
         python_callable=select_fruit,  ## 실행 하고자 하는 파이썬 함수
-        op_kwargs={}
+        op_kwargs={},
+        trigger_rule='all_done'        ## 선행 후행 task 실패 상관없이 실행
     )
 
     @outer_func
@@ -72,7 +73,8 @@ with DAG(
     py_t2 = PythonOperator(
         task_id='py_t2',               ## task name
         python_callable=test_1,  ## 실행 하고자 하는 파이썬 함수
-        op_kwargs={}
+        op_kwargs={},
+        trigger_rule='all_done'
     )
 
 
