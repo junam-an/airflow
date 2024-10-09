@@ -19,9 +19,19 @@ def outer_func(target_func, **kwargs):
     run_id = str(kwargs.get('run_id'))
     state = kwargs.get('ti').state
 
-    log_table_write.get_conn_pre(dag_id=dag_id, task_id=task_id, run_id=run_id, execute_id=execution_date, task_state='R', err_msg='')
+    try:
+      log_table_write.get_conn_pre(dag_id=dag_id, task_id=task_id, run_id=run_id, execute_id=execution_date, task_state='R', err_msg='')
+    except Exception as e:
+      log_table_write.get_conn_pre(dag_id=dag_id, task_id=task_id, run_id=run_id, execute_id=execution_date, task_state='E', err_msg=str(e)[0:4000])
+      raise
 
     target_func()
+
+    try:
+      log_table_write.get_conn_post(dag_id=dag_id, task_id=task_id, run_id=run_id, execute_id=execution_date, task_state='S', err_msg='')
+    except Exception as e:
+      log_table_write.get_conn_post(dag_id=dag_id, task_id=task_id, run_id=run_id, execute_id=execution_date, task_state='E', err_msg=str(e)[0:4000])
+      raise
     print('target 함수 실행 후 입니다.')
   return inner_func
 
