@@ -32,7 +32,7 @@ with DAG(
         try:
           log_table_write.get_conn_pre(dag_id=dag_id, task_id=task_id, run_id=run_id, execute_id=execution_date, task_state='R', err_msg='')
         except Exception as e:
-          log_table_write.get_conn_pre(dag_id=dag_id, task_id=task_id, run_id=run_id, execute_id=execution_date, task_state='E', err_msg=str(e))
+          log_table_write.get_conn_pre(dag_id=dag_id, task_id=task_id, run_id=run_id, execute_id=execution_date, task_state='E', err_msg=str(e)[0:4000])
           raise
         
         ##### business logic 수행
@@ -42,14 +42,14 @@ with DAG(
           print(fruit[rand_int])
           raise Exception("Intentional Failure") # 테스트를 위한 임의로 에러 유발 코드
         except Exception as e:
-          log_table_write.get_conn_post(dag_id=dag_id, task_id=task_id, run_id=run_id, execute_id=execution_date, task_state='E', err_msg=str(e))
+          log_table_write.get_conn_post(dag_id=dag_id, task_id=task_id, run_id=run_id, execute_id=execution_date, task_state='E', err_msg=str(e)[0:4000])
           raise
          ##### business logic 종료
 
         try:
           log_table_write.get_conn_post(dag_id=dag_id, task_id=task_id, run_id=run_id, execute_id=execution_date, task_state='S', err_msg='')
         except Exception as e:
-          log_table_write.get_conn_post(dag_id=dag_id, task_id=task_id, run_id=run_id, execute_id=execution_date, task_state='E', err_msg=str(e))
+          log_table_write.get_conn_post(dag_id=dag_id, task_id=task_id, run_id=run_id, execute_id=execution_date, task_state='E', err_msg=str(e)[0:4000])
           raise
            
 
