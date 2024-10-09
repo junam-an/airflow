@@ -40,7 +40,7 @@ with DAG(
           fruit = ['APPLE', 'BANANA', 'ORANGE', 'AVOCADO']
           rand_int = random.randint(0,3)
           print(fruit[rand_int])
-          #raise Exception("Intentional Failure") # 테스트를 위한 임의로 에러 유발 코드
+          raise Exception("Intentional Failure") # 테스트를 위한 임의로 에러 유발 코드
         except Exception as e:
           log_table_write.get_conn_post(dag_id=dag_id, task_id=task_id, run_id=run_id, execute_id=execution_date, task_state='E', err_msg=str(e))
           raise
