@@ -65,7 +65,7 @@ with DAG(
 
     @outer_func
     @task(task_id='py_t2', op_kwargs={})
-    def test_1():
+    def test_1(**kwargs):
       print('TEST JOB')
 
     py_t2 = test_1()
