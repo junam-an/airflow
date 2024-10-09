@@ -9,7 +9,6 @@ from airflow.operators.python import PythonOperator
 
 def outer_func(target_func, **kwargs):
   def inner_func(**kwargs):
-    print('target 함수 실행 전 입니다.')
     from common.common_execute_pre import CustomPostgresHook
     log_table_write = CustomPostgresHook()
 
@@ -32,7 +31,6 @@ def outer_func(target_func, **kwargs):
     except Exception as e:
       log_table_write.get_conn_post(dag_id=dag_id, task_id=task_id, run_id=run_id, execute_id=execution_date, task_state='E', err_msg=str(e)[0:4000])
       raise
-    print('target 함수 실행 후 입니다.')
   return inner_func
 
 
@@ -46,6 +44,7 @@ with DAG(
     #tags=["example", "example2"],                         ## 이름 아래 작게 출력 되는 태그 이름
     #params={"example_key": "example_value"},              ## DAG에서 사용하는 값 파라미터
 ) as dag:
+    from airflow.decorators import task
     @outer_func
     def select_fruit(**kwargs):
         ##### business logic 수행
@@ -64,5 +63,11 @@ with DAG(
         op_kwargs={}
     )
 
+    @outer_func
+    @task(task_id='py_t2', op_kwargs={})
+    def test_1():
+      print('TEST JOB')
 
-    py_t1
+    py_t2 = test_1()
+
+    py_t1 >> py_t2
