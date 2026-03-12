@@ -72,44 +72,6 @@ with DAG(
             WHERE {where_clause}
         """
 
-        # MERGE ON 절
-        merge_on_sql = " AND ".join(
-            [f"t.{pk} = s.{pk}" for pk in pk_columns]
-        )
-
-        # UPDATE 대상은 PK 제외 컬럼만
-        non_pk_columns = [c for c in columns if c not in pk_columns]
-
-        update_set_sql = ", ".join(
-            [f"{col} = s.{col}" for col in non_pk_columns]
-        )
-
-        insert_columns_sql = ", ".join(columns)
-        insert_values_sql = ", ".join([f"s.{col}" for col in columns])
-
-        # PostgreSQL 15+ 에서 MERGE 사용 가능
-        if non_pk_columns:
-            merge_sql = f"""
-                MERGE INTO {target_table} AS t
-                USING {stg_table} AS s
-                ON ({merge_on_sql})
-                WHEN MATCHED THEN
-                    UPDATE SET {update_set_sql}
-                WHEN NOT MATCHED THEN
-                    INSERT ({insert_columns_sql})
-                    VALUES ({insert_values_sql})
-            """
-        else:
-            # 모든 컬럼이 PK인 극단적 케이스 대응
-            merge_sql = f"""
-                MERGE INTO {target_table} AS t
-                USING {stg_table} AS s
-                ON ({merge_on_sql})
-                WHEN NOT MATCHED THEN
-                    INSERT ({insert_columns_sql})
-                    VALUES ({insert_values_sql})
-            """
-
         create_stg_sql = f"""
             CREATE TABLE IF NOT EXISTS {stg_table}
             (LIKE {target_table} INCLUDING ALL)
@@ -117,11 +79,34 @@ with DAG(
 
         truncate_stg_sql = f"TRUNCATE TABLE {stg_table}"
 
+        # DELETE ... EXISTS 조인 조건
+        delete_exists_condition_sql = " AND ".join(
+            [f"t.{pk} = s.{pk}" for pk in pk_columns]
+        )
+
+        delete_sql = f"""
+            DELETE FROM {target_table} t
+            WHERE EXISTS (
+                SELECT 1
+                FROM {stg_table} s
+                WHERE {delete_exists_condition_sql}
+            )
+        """
+
+        insert_columns_sql = ", ".join(columns)
+        select_columns_sql = ", ".join([f"s.{col}" for col in columns])
+
+        insert_sql = f"""
+            INSERT INTO {target_table} ({insert_columns_sql})
+            SELECT {select_columns_sql}
+            FROM {stg_table} s
+        """
+
         source_hook = PostgresHook(postgres_conn_id=SOURCE_POSTGRES_CONN_ID)
         target_hook = PostgresHook(postgres_conn_id=TARGET_POSTGRES_CONN_ID)
 
         source_conn = source_hook.get_conn()
-        source_cursor = source_conn.cursor(name=f"csr_{target_table}")  # 서버사이드 커서
+        source_cursor = source_conn.cursor(name=f"csr_{target_table}")
         source_cursor.itersize = CHUNK_SIZE
 
         total_rows = 0
@@ -133,7 +118,7 @@ with DAG(
             # 2) STG 테이블 비우기
             target_hook.run(truncate_stg_sql)
 
-            # 3) PostgreSQL SELECT 실행
+            # 3) 소스 SELECT 실행
             source_cursor.execute(source_sql)
 
             # 4) STG 테이블에 chunk 단위 INSERT
@@ -158,14 +143,17 @@ with DAG(
                     f"chunk={len(rows)} total={total_rows}"
                 )
 
-            # 5) STG -> TARGET MERGE
+            # 5) STG -> TARGET DELETE + INSERT
             if total_rows > 0:
-                target_hook.run(merge_sql)
+                target_hook.run(delete_sql)
+                print(f"{target_table} DELETE completed")
+
+                target_hook.run(insert_sql)
                 print(
-                    f"{stg_table} -> {target_table} MERGE completed, total={total_rows}"
+                    f"{stg_table} -> {target_table} INSERT completed, total={total_rows}"
                 )
             else:
-                print(f"{source_table}: no rows fetched, MERGE skipped")
+                print(f"{source_table}: no rows fetched, DELETE/INSERT skipped")
 
         finally:
             source_cursor.close()
