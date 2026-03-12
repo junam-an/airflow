@@ -31,7 +31,8 @@ with DAG(
             pk_column,
             columns,
             where_clause,
-            load_option
+            load_option,
+            stg_drop_yn
         FROM etl_meta
         WHERE 1=1
           AND enable_yn = 'Y'
@@ -51,10 +52,12 @@ with DAG(
                     "columns": [c.strip() for c in r[3].split(",")],
                     "where_clause": r[4],
                     "load_option": r[5].strip().lower() if r[5] else "di",
+                    "stg_drop_yn": r[6].strip().upper() if r[6] else "N",
                 }
             )
 
         return configs
+
 
     @task
     def run_etl(table_config: dict):
@@ -64,6 +67,7 @@ with DAG(
         columns = table_config["columns"]
         where_clause = table_config["where_clause"]
         load_option = table_config["load_option"]
+        stg_drop_yn = table_config["stg_drop_yn"]
 
         stg_table = f"stg_{target_table}"
 
@@ -83,6 +87,8 @@ with DAG(
         truncate_stg_sql = f"TRUNCATE TABLE {stg_table}"
         truncate_target_sql = f"TRUNCATE TABLE {target_table}"
 
+        drop_stg_sql = f"DROP TABLE IF EXISTS {stg_table}"
+
         insert_columns_sql = ", ".join(columns)
         select_columns_sql = ", ".join([f"s.{col}" for col in columns])
 
@@ -92,15 +98,12 @@ with DAG(
             FROM {stg_table} s
         """
 
-        # PK 조인 조건
         pk_join_condition_sql = " AND ".join(
             [f"t.{pk} = s.{pk}" for pk in pk_columns]
         )
 
-        # PK 제외 컬럼
         non_pk_columns = [c for c in columns if c not in pk_columns]
 
-        # ui: UPDATE SQL
         if non_pk_columns:
             update_set_sql = ", ".join(
                 [f"{col} = s.{col}" for col in non_pk_columns]
@@ -115,7 +118,6 @@ with DAG(
         else:
             update_sql = None
 
-        # ui/di 공통으로 쓸 INSERT NOT EXISTS SQL
         not_exists_condition_sql = " AND ".join(
             [f"t.{pk} = s.{pk}" for pk in pk_columns]
         )
@@ -131,7 +133,6 @@ with DAG(
             )
         """
 
-        # di: DELETE SQL
         delete_sql = f"""
             DELETE FROM {target_table} t
             WHERE EXISTS (
@@ -151,16 +152,12 @@ with DAG(
         total_rows = 0
 
         try:
-            # 1) STG 테이블 생성
-            target_hook.run(create_stg_sql)
 
-            # 2) STG 테이블 비우기
+            target_hook.run(create_stg_sql)
             target_hook.run(truncate_stg_sql)
 
-            # 3) 소스 SELECT 실행
             source_cursor.execute(source_sql)
 
-            # 4) STG 테이블에 chunk 단위 INSERT
             while True:
                 rows = source_cursor.fetchmany(size=CHUNK_SIZE)
 
@@ -182,48 +179,45 @@ with DAG(
                     f"chunk={len(rows)} total={total_rows}"
                 )
 
-            # 5) load_option 에 따라 TARGET 적재
             if total_rows > 0:
+
                 if load_option == "ui":
+
                     if update_sql:
                         target_hook.run(update_sql)
-                        print(f"{target_table} UPDATE completed")
 
                     target_hook.run(insert_not_exists_sql)
-                    print(
-                        f"{stg_table} -> {target_table} INSERT completed (UI), total={total_rows}"
-                    )
 
                 elif load_option == "di":
-                    target_hook.run(delete_sql)
-                    print(f"{target_table} DELETE completed")
 
+                    target_hook.run(delete_sql)
                     target_hook.run(insert_sql)
-                    print(
-                        f"{stg_table} -> {target_table} INSERT completed (DI), total={total_rows}"
-                    )
 
                 elif load_option == "ti":
-                    target_hook.run(truncate_target_sql)
-                    print(f"{target_table} TRUNCATE completed")
 
+                    target_hook.run(truncate_target_sql)
                     target_hook.run(insert_sql)
-                    print(
-                        f"{stg_table} -> {target_table} INSERT completed (TI), total={total_rows}"
-                    )
 
                 else:
                     raise ValueError(
-                        f"Invalid load_option: {load_option}. "
-                        f"Allowed values are ui, di, ti."
+                        f"Invalid load_option: {load_option}"
                     )
 
             else:
-                print(f"{source_table}: no rows fetched, target load skipped")
+                print(f"{source_table}: no rows fetched")
 
         finally:
+
             source_cursor.close()
             source_conn.close()
+
+            # STG DROP 여부 처리
+            if stg_drop_yn == "Y":
+                target_hook.run(drop_stg_sql)
+                print(f"{stg_table} dropped (stg_drop_yn=Y)")
+            else:
+                print(f"{stg_table} kept (stg_drop_yn=N)")
+
 
     table_configs = get_table_configs()
     run_etl.expand(table_config=table_configs)
