@@ -30,7 +30,8 @@ with DAG(
             target_table,
             pk_column,
             columns,
-            where_clause
+            where_clause,
+            load_option
         FROM etl_meta
         WHERE 1=1
           AND enable_yn = 'Y'
@@ -46,9 +47,10 @@ with DAG(
                 {
                     "source_table": r[0],
                     "target_table": r[1],
-                    "pk_columns": [c.strip() for c in r[2].split(",")],   # 복합 PK 지원
+                    "pk_columns": [c.strip() for c in r[2].split(",")],
                     "columns": [c.strip() for c in r[3].split(",")],
                     "where_clause": r[4],
+                    "load_option": r[5].strip().lower() if r[5] else "di",
                 }
             )
 
@@ -61,6 +63,7 @@ with DAG(
         pk_columns = table_config["pk_columns"]
         columns = table_config["columns"]
         where_clause = table_config["where_clause"]
+        load_option = table_config["load_option"]
 
         stg_table = f"stg_{target_table}"
 
@@ -78,20 +81,7 @@ with DAG(
         """
 
         truncate_stg_sql = f"TRUNCATE TABLE {stg_table}"
-
-        # DELETE ... EXISTS 조인 조건
-        delete_exists_condition_sql = " AND ".join(
-            [f"t.{pk} = s.{pk}" for pk in pk_columns]
-        )
-
-        delete_sql = f"""
-            DELETE FROM {target_table} t
-            WHERE EXISTS (
-                SELECT 1
-                FROM {stg_table} s
-                WHERE {delete_exists_condition_sql}
-            )
-        """
+        truncate_target_sql = f"TRUNCATE TABLE {target_table}"
 
         insert_columns_sql = ", ".join(columns)
         select_columns_sql = ", ".join([f"s.{col}" for col in columns])
@@ -100,6 +90,55 @@ with DAG(
             INSERT INTO {target_table} ({insert_columns_sql})
             SELECT {select_columns_sql}
             FROM {stg_table} s
+        """
+
+        # PK 조인 조건
+        pk_join_condition_sql = " AND ".join(
+            [f"t.{pk} = s.{pk}" for pk in pk_columns]
+        )
+
+        # PK 제외 컬럼
+        non_pk_columns = [c for c in columns if c not in pk_columns]
+
+        # ui: UPDATE SQL
+        if non_pk_columns:
+            update_set_sql = ", ".join(
+                [f"{col} = s.{col}" for col in non_pk_columns]
+            )
+
+            update_sql = f"""
+                UPDATE {target_table} t
+                SET {update_set_sql}
+                FROM {stg_table} s
+                WHERE {pk_join_condition_sql}
+            """
+        else:
+            update_sql = None
+
+        # ui/di 공통으로 쓸 INSERT NOT EXISTS SQL
+        not_exists_condition_sql = " AND ".join(
+            [f"t.{pk} = s.{pk}" for pk in pk_columns]
+        )
+
+        insert_not_exists_sql = f"""
+            INSERT INTO {target_table} ({insert_columns_sql})
+            SELECT {select_columns_sql}
+            FROM {stg_table} s
+            WHERE NOT EXISTS (
+                SELECT 1
+                FROM {target_table} t
+                WHERE {not_exists_condition_sql}
+            )
+        """
+
+        # di: DELETE SQL
+        delete_sql = f"""
+            DELETE FROM {target_table} t
+            WHERE EXISTS (
+                SELECT 1
+                FROM {stg_table} s
+                WHERE {pk_join_condition_sql}
+            )
         """
 
         source_hook = PostgresHook(postgres_conn_id=SOURCE_POSTGRES_CONN_ID)
@@ -143,17 +182,44 @@ with DAG(
                     f"chunk={len(rows)} total={total_rows}"
                 )
 
-            # 5) STG -> TARGET DELETE + INSERT
+            # 5) load_option 에 따라 TARGET 적재
             if total_rows > 0:
-                target_hook.run(delete_sql)
-                print(f"{target_table} DELETE completed")
+                if load_option == "ui":
+                    if update_sql:
+                        target_hook.run(update_sql)
+                        print(f"{target_table} UPDATE completed")
 
-                target_hook.run(insert_sql)
-                print(
-                    f"{stg_table} -> {target_table} INSERT completed, total={total_rows}"
-                )
+                    target_hook.run(insert_not_exists_sql)
+                    print(
+                        f"{stg_table} -> {target_table} INSERT completed (UI), total={total_rows}"
+                    )
+
+                elif load_option == "di":
+                    target_hook.run(delete_sql)
+                    print(f"{target_table} DELETE completed")
+
+                    target_hook.run(insert_sql)
+                    print(
+                        f"{stg_table} -> {target_table} INSERT completed (DI), total={total_rows}"
+                    )
+
+                elif load_option == "ti":
+                    target_hook.run(truncate_target_sql)
+                    print(f"{target_table} TRUNCATE completed")
+
+                    target_hook.run(insert_sql)
+                    print(
+                        f"{stg_table} -> {target_table} INSERT completed (TI), total={total_rows}"
+                    )
+
+                else:
+                    raise ValueError(
+                        f"Invalid load_option: {load_option}. "
+                        f"Allowed values are ui, di, ti."
+                    )
+
             else:
-                print(f"{source_table}: no rows fetched, DELETE/INSERT skipped")
+                print(f"{source_table}: no rows fetched, target load skipped")
 
         finally:
             source_cursor.close()
