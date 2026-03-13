@@ -11,7 +11,7 @@ from airflow.providers.postgres.hooks.postgres import PostgresHook
 SOURCE_POSTGRES_CONN_ID = "postgres_conn"
 TARGET_POSTGRES_CONN_ID = "postgres_conn"
 
-CHUNK_SIZE = 5000
+CHUNK_SIZE = 5000      # 처리할 row fetch size
 
 
 def parse_csv_columns(raw_value: str | None) -> list[str]:
@@ -103,7 +103,7 @@ def parse_column_mapping(raw_mapping: str | None) -> dict[str, str]:
 
     return result
 
-
+# 소스 테이블 수행 쿼리 기준 컬럼명 추출
 def build_limit_0_sql(source_exec_sql: str) -> str:
     return f"""
         SELECT *
@@ -119,13 +119,13 @@ with DAG(
     start_date=datetime(2024, 1, 1),
     schedule=None,
     catchup=False,
-    max_active_tasks=4
+    max_active_tasks=4 #task 동시 실행 개수 제한
 ) as dag:
 
     @task
     def get_table_configs():
         source_hook = PostgresHook(postgres_conn_id=SOURCE_POSTGRES_CONN_ID)
-
+        # 메타 테이블 에서 task 메타 정보 가져 오기
         sql = """
         SELECT
             source_table,
@@ -199,8 +199,8 @@ with DAG(
 
         return configs
 
-    @task(pool_slots=1)
-    def run_etl(table_config: dict):
+    @task(pool_slots=1) # 태스크별 DB 커넥션 사용 개수 지정
+    def run_etl(table_config: dict): # 가져온 메타 정보 기준 동적으로 태스크 생성 후 실행
         source_table = (table_config.get("source_table") or "").strip()
         target_table = (table_config.get("target_table") or "").strip()
         pk_columns = table_config.get("pk_columns") or []
