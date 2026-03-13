@@ -105,9 +105,6 @@ def parse_column_mapping(raw_mapping: str | None) -> dict[str, str]:
 
 
 def build_limit_0_sql(source_exec_sql: str) -> str:
-    """
-    원본 SELECT를 감싸서 컬럼 메타데이터만 조회
-    """
     return f"""
         SELECT *
         FROM (
@@ -136,7 +133,9 @@ with DAG(
             source_exec_sql,
             column_mapping,
             load_option,
-            stg_drop_yn
+            stg_drop_yn,
+            target_pre_sql,
+            target_post_sql
         FROM etl_meta
         WHERE 1=1
           AND enable_yn = 'Y'
@@ -155,6 +154,8 @@ with DAG(
             column_mapping = r[4]
             load_option = (r[5] or "di").strip().lower() if r[5] is not None else "di"
             stg_drop_yn = (r[6] or "N").strip().upper() if r[6] is not None else "N"
+            target_pre_sql = (r[7] or "").strip() if r[7] is not None else ""
+            target_post_sql = (r[8] or "").strip() if r[8] is not None else ""
 
             if not target_table:
                 raise ValueError("etl_meta.target_table is empty")
@@ -190,6 +191,8 @@ with DAG(
                     "column_mapping": column_mapping,
                     "load_option": load_option,
                     "stg_drop_yn": stg_drop_yn,
+                    "target_pre_sql": target_pre_sql,
+                    "target_post_sql": target_post_sql,
                 }
             )
 
@@ -204,6 +207,8 @@ with DAG(
         raw_column_mapping = table_config.get("column_mapping")
         load_option = (table_config.get("load_option") or "di").strip().lower()
         stg_drop_yn = (table_config.get("stg_drop_yn") or "N").strip().upper()
+        target_pre_sql = (table_config.get("target_pre_sql") or "").strip()
+        target_post_sql = (table_config.get("target_post_sql") or "").strip()
 
         if not target_table:
             raise ValueError("table_config.target_table is empty")
@@ -251,7 +256,7 @@ with DAG(
 
             source_conn = source_hook.get_conn()
 
-            # 1) 일반 커서로 컬럼 메타데이터 먼저 조회
+            # 1) 일반 커서로 컬럼 메타데이터 조회
             meta_cursor = source_conn.cursor()
             meta_sql = build_limit_0_sql(source_exec_sql)
             meta_cursor.execute(meta_sql)
@@ -379,6 +384,10 @@ with DAG(
                 )
 
             if total_rows > 0:
+                if target_pre_sql:
+                    target_hook.run(target_pre_sql)
+                    print(f"{target_table} target_pre_sql completed")
+
                 if load_option == "ui":
                     if update_sql:
                         target_hook.run(update_sql)
@@ -406,6 +415,10 @@ with DAG(
                     print(
                         f"{stg_table} -> {target_table} INSERT completed (TI), total={total_rows}"
                     )
+
+                if target_post_sql:
+                    target_hook.run(target_post_sql)
+                    print(f"{target_table} target_post_sql completed")
 
             else:
                 print(f"{target_table}: no rows fetched, target load skipped")
