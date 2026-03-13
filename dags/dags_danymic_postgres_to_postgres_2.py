@@ -248,9 +248,15 @@ with DAG(
         source_conn = None
         meta_cursor = None
         source_cursor = None
+
+        target_tx_conn = None
+        target_tx_cursor = None
+
         total_rows = 0
+        job_succeeded = False
 
         try:
+            # STG 준비
             target_hook.run(create_stg_sql)
             target_hook.run(truncate_stg_sql)
 
@@ -384,44 +390,58 @@ with DAG(
                 )
 
             if total_rows > 0:
-                if target_pre_sql:
-                    target_hook.run(target_pre_sql)
-                    print(f"{target_table} target_pre_sql completed")
+                # 타겟 반영 구간 트랜잭션 처리
+                target_tx_conn = target_hook.get_conn()
+                target_tx_conn.autocommit = False
+                target_tx_cursor = target_tx_conn.cursor()
 
-                if load_option == "ui":
-                    if update_sql:
-                        target_hook.run(update_sql)
-                        print(f"{target_table} UPDATE completed")
+                try:
+                    if target_pre_sql:
+                        target_tx_cursor.execute(target_pre_sql)
+                        print(f"{target_table} target_pre_sql completed")
 
-                    target_hook.run(insert_not_exists_sql)
-                    print(
-                        f"{stg_table} -> {target_table} INSERT completed (UI), total={total_rows}"
-                    )
+                    if load_option == "ui":
+                        if update_sql:
+                            target_tx_cursor.execute(update_sql)
+                            print(f"{target_table} UPDATE completed")
 
-                elif load_option == "di":
-                    target_hook.run(delete_sql)
-                    print(f"{target_table} DELETE completed")
+                        target_tx_cursor.execute(insert_not_exists_sql)
+                        print(
+                            f"{stg_table} -> {target_table} INSERT completed (UI), total={total_rows}"
+                        )
 
-                    target_hook.run(insert_sql)
-                    print(
-                        f"{stg_table} -> {target_table} INSERT completed (DI), total={total_rows}"
-                    )
+                    elif load_option == "di":
+                        target_tx_cursor.execute(delete_sql)
+                        print(f"{target_table} DELETE completed")
 
-                elif load_option == "ti":
-                    target_hook.run(truncate_target_sql)
-                    print(f"{target_table} TRUNCATE completed")
+                        target_tx_cursor.execute(insert_sql)
+                        print(
+                            f"{stg_table} -> {target_table} INSERT completed (DI), total={total_rows}"
+                        )
 
-                    target_hook.run(insert_sql)
-                    print(
-                        f"{stg_table} -> {target_table} INSERT completed (TI), total={total_rows}"
-                    )
+                    elif load_option == "ti":
+                        target_tx_cursor.execute(truncate_target_sql)
+                        print(f"{target_table} TRUNCATE completed")
 
-                if target_post_sql:
-                    target_hook.run(target_post_sql)
-                    print(f"{target_table} target_post_sql completed")
+                        target_tx_cursor.execute(insert_sql)
+                        print(
+                            f"{stg_table} -> {target_table} INSERT completed (TI), total={total_rows}"
+                        )
+
+                    if target_post_sql:
+                        target_tx_cursor.execute(target_post_sql)
+                        print(f"{target_table} target_post_sql completed")
+
+                    target_tx_conn.commit()
+                    job_succeeded = True
+
+                except Exception:
+                    target_tx_conn.rollback()
+                    raise
 
             else:
                 print(f"{target_table}: no rows fetched, target load skipped")
+                job_succeeded = True
 
         finally:
             if meta_cursor is not None:
@@ -433,11 +453,21 @@ with DAG(
             if source_conn is not None:
                 source_conn.close()
 
-            if stg_drop_yn == "Y":
+            if target_tx_cursor is not None:
+                target_tx_cursor.close()
+
+            if target_tx_conn is not None:
+                target_tx_conn.close()
+
+            # 실패 시 STG 보존
+            if job_succeeded and stg_drop_yn == "Y":
                 target_hook.run(drop_stg_sql)
                 print(f"{stg_table} dropped (stg_drop_yn=Y)")
             else:
-                print(f"{stg_table} kept (stg_drop_yn=N)")
+                print(
+                    f"{stg_table} kept "
+                    f"(job_succeeded={job_succeeded}, stg_drop_yn={stg_drop_yn})"
+                )
 
     table_configs = get_table_configs()
     run_etl.expand(table_config=table_configs)
