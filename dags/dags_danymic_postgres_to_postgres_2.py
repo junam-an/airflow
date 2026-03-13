@@ -14,36 +14,87 @@ TARGET_POSTGRES_CONN_ID = "postgres_conn"
 CHUNK_SIZE = 5000
 
 
+def parse_csv_columns(raw_value: str | None) -> list[str]:
+    """
+    콤마 구분 컬럼 문자열을 list[str] 로 변환
+    예: "a, b, c" -> ["a", "b", "c"]
+    """
+    if raw_value is None:
+        return []
+
+    return [c.strip() for c in raw_value.split(",") if c and c.strip()]
+
+
 def parse_column_mapping(raw_mapping: str | None) -> dict[str, str]:
     """
     source alias -> target column 매핑 파싱
+
     지원 형식:
-      1) JSON: {"src_a":"a","src_b":"b"}
-      2) 문자열: "src_a:a, src_b:b"
-      3) 문자열: "src_a=a, src_b=b"
+      1) JSON dict
+         {"src_a":"a","src_b":"b"}
+
+      2) JSON list
+         [{"source":"src_a","target":"a"},{"source":"src_b","target":"b"}]
+
+      3) 문자열
+         "src_a:a, src_b:b"
+         "src_a=a, src_b=b"
     """
-    if not raw_mapping or not raw_mapping.strip():
+    if raw_mapping is None:
         return {}
 
     raw_mapping = raw_mapping.strip()
+    if not raw_mapping:
+        return {}
 
-    # 1) JSON 형식 우선 처리
+    # 1) JSON 우선 시도
     try:
         parsed = json.loads(raw_mapping)
 
         if isinstance(parsed, dict):
-            return {str(k).strip(): str(v).strip() for k, v in parsed.items()}
+            result = {}
+            for k, v in parsed.items():
+                src = str(k).strip()
+                tgt = str(v).strip()
+
+                if not src or not tgt:
+                    raise ValueError(
+                        f"Invalid column_mapping JSON entry: {k}:{v}"
+                    )
+
+                result[src] = tgt
+
+            return result
 
         if isinstance(parsed, list):
             result = {}
             for item in parsed:
-                if isinstance(item, dict) and "source" in item and "target" in item:
-                    result[str(item["source"]).strip()] = str(item["target"]).strip()
+                if not isinstance(item, dict):
+                    raise ValueError(
+                        f"Invalid column_mapping JSON list item: {item}"
+                    )
+
+                if "source" not in item or "target" not in item:
+                    raise ValueError(
+                        f"Invalid column_mapping JSON list item: {item}"
+                    )
+
+                src = str(item["source"]).strip()
+                tgt = str(item["target"]).strip()
+
+                if not src or not tgt:
+                    raise ValueError(
+                        f"Invalid column_mapping JSON list item: {item}"
+                    )
+
+                result[src] = tgt
+
             return result
-    except Exception:
+
+    except json.JSONDecodeError:
         pass
 
-    # 2) src:tar, src2:tar2 또는 src=tar 형식 처리
+    # 2) 문자열 파싱
     result = {}
 
     for pair in raw_mapping.split(","):
@@ -74,7 +125,7 @@ def parse_column_mapping(raw_mapping: str | None) -> dict[str, str]:
 
 
 with DAG(
-    dag_id="dynamic_postgres_to_postgres_etl_meta_2",
+    dag_id="dynamic_postgres_to_postgres_etl_meta",
     start_date=datetime(2024, 1, 1),
     schedule=None,
     catchup=False,
@@ -104,15 +155,48 @@ with DAG(
         configs = []
 
         for r in rows:
+            source_table = (r[0] or "").strip() if r[0] is not None else ""
+            target_table = (r[1] or "").strip() if r[1] is not None else ""
+            pk_columns = parse_csv_columns(r[2])
+            source_exec_sql = (r[3] or "").strip() if r[3] is not None else ""
+            column_mapping = r[4]
+            load_option = (r[5] or "di").strip().lower() if r[5] is not None else "di"
+            stg_drop_yn = (r[6] or "N").strip().upper() if r[6] is not None else "N"
+
+            if not target_table:
+                raise ValueError("etl_meta.target_table is empty")
+
+            if load_option not in ("ui", "di", "ti"):
+                raise ValueError(
+                    f"{target_table}: invalid load_option [{load_option}]. "
+                    f"Allowed values are ui, di, ti."
+                )
+
+            if stg_drop_yn not in ("Y", "N"):
+                raise ValueError(
+                    f"{target_table}: invalid stg_drop_yn [{stg_drop_yn}]. "
+                    f"Allowed values are Y, N."
+                )
+
+            if not source_exec_sql:
+                raise ValueError(
+                    f"{target_table}: source_exec_sql is empty"
+                )
+
+            if load_option in ("ui", "di") and not pk_columns:
+                raise ValueError(
+                    f"{target_table}: pk_column is required for load_option [{load_option}]"
+                )
+
             configs.append(
                 {
-                    "source_table": r[0],
-                    "target_table": r[1],
-                    "pk_columns": [c.strip() for c in r[2].split(",") if c.strip()],
-                    "source_exec_sql": r[3],
-                    "column_mapping": r[4],
-                    "load_option": r[5].strip().lower() if r[5] else "di",
-                    "stg_drop_yn": r[6].strip().upper() if r[6] else "N",
+                    "source_table": source_table,
+                    "target_table": target_table,
+                    "pk_columns": pk_columns,
+                    "source_exec_sql": source_exec_sql,
+                    "column_mapping": column_mapping,
+                    "load_option": load_option,
+                    "stg_drop_yn": stg_drop_yn,
                 }
             )
 
@@ -120,13 +204,34 @@ with DAG(
 
     @task
     def run_etl(table_config: dict):
-        source_table = table_config["source_table"]
-        target_table = table_config["target_table"]
-        pk_columns = table_config["pk_columns"]
-        source_exec_sql = table_config["source_exec_sql"]
-        raw_column_mapping = table_config["column_mapping"]
-        load_option = table_config["load_option"]
-        stg_drop_yn = table_config["stg_drop_yn"]
+        source_table = (table_config.get("source_table") or "").strip()
+        target_table = (table_config.get("target_table") or "").strip()
+        pk_columns = table_config.get("pk_columns") or []
+        source_exec_sql = (table_config.get("source_exec_sql") or "").strip()
+        raw_column_mapping = table_config.get("column_mapping")
+        load_option = (table_config.get("load_option") or "di").strip().lower()
+        stg_drop_yn = (table_config.get("stg_drop_yn") or "N").strip().upper()
+
+        if not target_table:
+            raise ValueError("table_config.target_table is empty")
+
+        if not source_exec_sql:
+            raise ValueError(f"{target_table}: source_exec_sql is empty")
+
+        if load_option not in ("ui", "di", "ti"):
+            raise ValueError(
+                f"{target_table}: invalid load_option [{load_option}]"
+            )
+
+        if stg_drop_yn not in ("Y", "N"):
+            raise ValueError(
+                f"{target_table}: invalid stg_drop_yn [{stg_drop_yn}]"
+            )
+
+        if load_option in ("ui", "di") and not pk_columns:
+            raise ValueError(
+                f"{target_table}: pk_columns is required for load_option [{load_option}]"
+            )
 
         stg_table = f"stg_{target_table}"
 
@@ -142,52 +247,65 @@ with DAG(
         source_hook = PostgresHook(postgres_conn_id=SOURCE_POSTGRES_CONN_ID)
         target_hook = PostgresHook(postgres_conn_id=TARGET_POSTGRES_CONN_ID)
 
-        source_conn = source_hook.get_conn()
-        source_cursor = source_conn.cursor(name=f"csr_{target_table}")
-        source_cursor.itersize = CHUNK_SIZE
-
+        source_conn = None
+        source_cursor = None
         total_rows = 0
 
         try:
-            # 1) STG 생성 및 비우기
+            # 1) STG 생성 및 초기화
             target_hook.run(create_stg_sql)
             target_hook.run(truncate_stg_sql)
 
-            # 2) source_exec_sql 실행
+            # 2) 소스 SQL 실행
+            source_conn = source_hook.get_conn()
+            source_cursor = source_conn.cursor(name=f"csr_{target_table}")
+            source_cursor.itersize = CHUNK_SIZE
             source_cursor.execute(source_exec_sql)
 
-            # 3) source 결과 컬럼명 추출
+            # 3) 결과셋 검증
+            if source_cursor.description is None:
+                raise ValueError(
+                    f"{target_table}: source_exec_sql did not return a result set. "
+                    f"Only SELECT query is allowed. source_exec_sql=[{source_exec_sql}]"
+                )
+
             source_columns = [desc[0] for desc in source_cursor.description]
 
             if not source_columns:
                 raise ValueError(
-                    f"{target_table}: source_exec_sql returned no columns"
+                    f"{target_table}: source_exec_sql returned no columns. "
+                    f"source_exec_sql=[{source_exec_sql}]"
                 )
 
             # 4) 컬럼 매핑 파싱
-            column_mapping = parse_column_mapping(raw_column_mapping)
+            column_mapping = parse_column_mapping(raw_column_mapping) or {}
 
             # 5) source alias -> target column 변환
-            #    매핑이 없으면 동일명 사용
             target_columns = [
                 column_mapping.get(src_col, src_col)
                 for src_col in source_columns
             ]
 
-            # 중복 target 컬럼 방지
+            if not target_columns:
+                raise ValueError(
+                    f"{target_table}: mapped target_columns is empty"
+                )
+
+            # 6) target 컬럼 중복 검증
             if len(set(target_columns)) != len(target_columns):
                 raise ValueError(
                     f"{target_table}: duplicate target columns detected after mapping. "
                     f"source_columns={source_columns}, target_columns={target_columns}"
                 )
 
-            # PK 검증 (pk는 target 기준 컬럼명이라고 가정)
+            # 7) PK 검증
             missing_pk_columns = [pk for pk in pk_columns if pk not in target_columns]
             if missing_pk_columns:
                 raise ValueError(
                     f"{target_table}: mapped result does not include PK columns: "
                     f"{missing_pk_columns}. "
-                    f"source_columns={source_columns}, target_columns={target_columns}"
+                    f"source_columns={source_columns}, "
+                    f"target_columns={target_columns}"
                 )
 
             insert_columns_sql = ", ".join(target_columns)
@@ -243,9 +361,7 @@ with DAG(
                 )
             """
 
-            # 6) STG 적재
-            # rows 값 순서는 source_columns 순서대로 오므로
-            # target_fields만 mapped target_columns로 지정하면 됨
+            # 8) STG 적재
             while True:
                 rows = source_cursor.fetchmany(size=CHUNK_SIZE)
 
@@ -263,12 +379,13 @@ with DAG(
                 total_rows += len(rows)
 
                 print(
-                    f"{source_table} -> {stg_table} "
+                    f"{source_table or '[source_sql]'} -> {stg_table} "
                     f"chunk={len(rows)} total={total_rows} "
-                    f"source_columns={source_columns} target_columns={target_columns}"
+                    f"source_columns={source_columns} "
+                    f"target_columns={target_columns}"
                 )
 
-            # 7) load_option 별 target 적재
+            # 9) 타겟 적재
             if total_rows > 0:
                 if load_option == "ui":
                     if update_sql:
@@ -298,18 +415,15 @@ with DAG(
                         f"{stg_table} -> {target_table} INSERT completed (TI), total={total_rows}"
                     )
 
-                else:
-                    raise ValueError(
-                        f"Invalid load_option: {load_option}. "
-                        f"Allowed values are ui, di, ti."
-                    )
-
             else:
-                print(f"{source_table}: no rows fetched")
+                print(f"{target_table}: no rows fetched, target load skipped")
 
         finally:
-            source_cursor.close()
-            source_conn.close()
+            if source_cursor is not None:
+                source_cursor.close()
+
+            if source_conn is not None:
+                source_conn.close()
 
             if stg_drop_yn == "Y":
                 target_hook.run(drop_stg_sql)
