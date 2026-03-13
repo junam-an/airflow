@@ -160,10 +160,10 @@ with DAG(
             if not target_table:
                 raise ValueError("etl_meta.target_table is empty")
 
-            if load_option not in ("ui", "di", "ti"):
+            if load_option not in ("ui", "di", "ti", "i", "u", "d"):
                 raise ValueError(
                     f"{target_table}: invalid load_option [{load_option}]. "
-                    f"Allowed values are ui, di, ti."
+                    f"Allowed values are ui, di, ti, i, u, d."
                 )
 
             if stg_drop_yn not in ("Y", "N"):
@@ -177,7 +177,7 @@ with DAG(
                     f"{target_table}: source_exec_sql is empty"
                 )
 
-            if load_option in ("ui", "di") and not pk_columns:
+            if load_option in ("ui", "di", "u", "d") and not pk_columns:
                 raise ValueError(
                     f"{target_table}: pk_column is required for load_option [{load_option}]"
                 )
@@ -216,7 +216,7 @@ with DAG(
         if not source_exec_sql:
             raise ValueError(f"{target_table}: source_exec_sql is empty")
 
-        if load_option not in ("ui", "di", "ti"):
+        if load_option not in ("ui", "di", "ti", "i", "u", "d"):
             raise ValueError(
                 f"{target_table}: invalid load_option [{load_option}]"
             )
@@ -226,7 +226,7 @@ with DAG(
                 f"{target_table}: invalid stg_drop_yn [{stg_drop_yn}]"
             )
 
-        if load_option in ("ui", "di") and not pk_columns:
+        if load_option in ("ui", "di", "u", "d") and not pk_columns:
             raise ValueError(
                 f"{target_table}: pk_columns is required for load_option [{load_option}]"
             )
@@ -256,13 +256,11 @@ with DAG(
         job_succeeded = False
 
         try:
-            # STG 준비
             target_hook.run(create_stg_sql)
             target_hook.run(truncate_stg_sql)
 
             source_conn = source_hook.get_conn()
 
-            # 1) 일반 커서로 컬럼 메타데이터 조회
             meta_cursor = source_conn.cursor()
             meta_sql = build_limit_0_sql(source_exec_sql)
             meta_cursor.execute(meta_sql)
@@ -361,7 +359,6 @@ with DAG(
                 )
             """
 
-            # 2) named cursor로 실제 대량 조회
             source_cursor = source_conn.cursor(name=f"csr_{target_table}")
             source_cursor.itersize = CHUNK_SIZE
             source_cursor.execute(source_exec_sql)
@@ -390,7 +387,6 @@ with DAG(
                 )
 
             if total_rows > 0:
-                # 타겟 반영 구간 트랜잭션 처리
                 target_tx_conn = target_hook.get_conn()
                 target_tx_conn.autocommit = False
                 target_tx_cursor = target_tx_conn.cursor()
@@ -428,6 +424,25 @@ with DAG(
                             f"{stg_table} -> {target_table} INSERT completed (TI), total={total_rows}"
                         )
 
+                    elif load_option == "i":
+                        target_tx_cursor.execute(insert_sql)
+                        print(
+                            f"{stg_table} -> {target_table} INSERT completed (I), total={total_rows}"
+                        )
+
+                    elif load_option == "u":
+                        if not update_sql:
+                            print(
+                                f"{target_table}: no non-pk columns to update, UPDATE skipped (U)"
+                            )
+                        else:
+                            target_tx_cursor.execute(update_sql)
+                            print(f"{target_table} UPDATE completed (U)")
+
+                    elif load_option == "d":
+                        target_tx_cursor.execute(delete_sql)
+                        print(f"{target_table} DELETE completed (D)")
+
                     if target_post_sql:
                         target_tx_cursor.execute(target_post_sql)
                         print(f"{target_table} target_post_sql completed")
@@ -459,7 +474,6 @@ with DAG(
             if target_tx_conn is not None:
                 target_tx_conn.close()
 
-            # 실패 시 STG 보존
             if job_succeeded and stg_drop_yn == "Y":
                 target_hook.run(drop_stg_sql)
                 print(f"{stg_table} dropped (stg_drop_yn=Y)")
