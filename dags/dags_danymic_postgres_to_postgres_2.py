@@ -15,10 +15,6 @@ CHUNK_SIZE = 5000
 
 
 def parse_csv_columns(raw_value: str | None) -> list[str]:
-    """
-    콤마 구분 컬럼 문자열을 list[str] 로 변환
-    예: "a, b, c" -> ["a", "b", "c"]
-    """
     if raw_value is None:
         return []
 
@@ -26,20 +22,6 @@ def parse_csv_columns(raw_value: str | None) -> list[str]:
 
 
 def parse_column_mapping(raw_mapping: str | None) -> dict[str, str]:
-    """
-    source alias -> target column 매핑 파싱
-
-    지원 형식:
-      1) JSON dict
-         {"src_a":"a","src_b":"b"}
-
-      2) JSON list
-         [{"source":"src_a","target":"a"},{"source":"src_b","target":"b"}]
-
-      3) 문자열
-         "src_a:a, src_b:b"
-         "src_a=a, src_b=b"
-    """
     if raw_mapping is None:
         return {}
 
@@ -47,7 +29,6 @@ def parse_column_mapping(raw_mapping: str | None) -> dict[str, str]:
     if not raw_mapping:
         return {}
 
-    # 1) JSON 우선 시도
     try:
         parsed = json.loads(raw_mapping)
 
@@ -94,7 +75,6 @@ def parse_column_mapping(raw_mapping: str | None) -> dict[str, str]:
     except json.JSONDecodeError:
         pass
 
-    # 2) 문자열 파싱
     result = {}
 
     for pair in raw_mapping.split(","):
@@ -122,6 +102,19 @@ def parse_column_mapping(raw_mapping: str | None) -> dict[str, str]:
         result[src] = tgt
 
     return result
+
+
+def build_limit_0_sql(source_exec_sql: str) -> str:
+    """
+    원본 SELECT를 감싸서 컬럼 메타데이터만 조회
+    """
+    return f"""
+        SELECT *
+        FROM (
+            {source_exec_sql}
+        ) q
+        LIMIT 0
+    """
 
 
 with DAG(
@@ -248,28 +241,28 @@ with DAG(
         target_hook = PostgresHook(postgres_conn_id=TARGET_POSTGRES_CONN_ID)
 
         source_conn = None
+        meta_cursor = None
         source_cursor = None
         total_rows = 0
 
         try:
-            # 1) STG 생성 및 초기화
             target_hook.run(create_stg_sql)
             target_hook.run(truncate_stg_sql)
 
-            # 2) 소스 SQL 실행
             source_conn = source_hook.get_conn()
-            source_cursor = source_conn.cursor(name=f"csr_{target_table}")
-            source_cursor.itersize = CHUNK_SIZE
-            source_cursor.execute(source_exec_sql)
 
-            # 3) 결과셋 검증
-            if source_cursor.description is None:
+            # 1) 일반 커서로 컬럼 메타데이터 먼저 조회
+            meta_cursor = source_conn.cursor()
+            meta_sql = build_limit_0_sql(source_exec_sql)
+            meta_cursor.execute(meta_sql)
+
+            if meta_cursor.description is None:
                 raise ValueError(
                     f"{target_table}: source_exec_sql did not return a result set. "
                     f"Only SELECT query is allowed. source_exec_sql=[{source_exec_sql}]"
                 )
 
-            source_columns = [desc[0] for desc in source_cursor.description]
+            source_columns = [desc[0] for desc in meta_cursor.description]
 
             if not source_columns:
                 raise ValueError(
@@ -277,10 +270,8 @@ with DAG(
                     f"source_exec_sql=[{source_exec_sql}]"
                 )
 
-            # 4) 컬럼 매핑 파싱
             column_mapping = parse_column_mapping(raw_column_mapping) or {}
 
-            # 5) source alias -> target column 변환
             target_columns = [
                 column_mapping.get(src_col, src_col)
                 for src_col in source_columns
@@ -291,14 +282,12 @@ with DAG(
                     f"{target_table}: mapped target_columns is empty"
                 )
 
-            # 6) target 컬럼 중복 검증
             if len(set(target_columns)) != len(target_columns):
                 raise ValueError(
                     f"{target_table}: duplicate target columns detected after mapping. "
                     f"source_columns={source_columns}, target_columns={target_columns}"
                 )
 
-            # 7) PK 검증
             missing_pk_columns = [pk for pk in pk_columns if pk not in target_columns]
             if missing_pk_columns:
                 raise ValueError(
@@ -361,7 +350,11 @@ with DAG(
                 )
             """
 
-            # 8) STG 적재
+            # 2) named cursor로 실제 대량 조회
+            source_cursor = source_conn.cursor(name=f"csr_{target_table}")
+            source_cursor.itersize = CHUNK_SIZE
+            source_cursor.execute(source_exec_sql)
+
             while True:
                 rows = source_cursor.fetchmany(size=CHUNK_SIZE)
 
@@ -385,7 +378,6 @@ with DAG(
                     f"target_columns={target_columns}"
                 )
 
-            # 9) 타겟 적재
             if total_rows > 0:
                 if load_option == "ui":
                     if update_sql:
@@ -419,6 +411,9 @@ with DAG(
                 print(f"{target_table}: no rows fetched, target load skipped")
 
         finally:
+            if meta_cursor is not None:
+                meta_cursor.close()
+
             if source_cursor is not None:
                 source_cursor.close()
 
