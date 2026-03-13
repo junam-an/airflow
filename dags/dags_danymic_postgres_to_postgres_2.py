@@ -74,7 +74,7 @@ def parse_column_mapping(raw_mapping: str | None) -> dict[str, str]:
 
 
 with DAG(
-    dag_id="dynamic_postgres_to_postgres_etl_meta",
+    dag_id="dynamic_postgres_to_postgres_etl_meta_2",
     start_date=datetime(2024, 1, 1),
     schedule=None,
     catchup=False,
