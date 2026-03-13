@@ -119,6 +119,7 @@ with DAG(
     start_date=datetime(2024, 1, 1),
     schedule=None,
     catchup=False,
+    max_active_tasks=4
 ) as dag:
 
     @task
@@ -198,7 +199,7 @@ with DAG(
 
         return configs
 
-    @task
+    @task(pool_slots=1)
     def run_etl(table_config: dict):
         source_table = (table_config.get("source_table") or "").strip()
         target_table = (table_config.get("target_table") or "").strip()
