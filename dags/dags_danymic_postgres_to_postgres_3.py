@@ -8,7 +8,7 @@ from airflow.decorators import task
 from airflow.providers.postgres.hooks.postgres import PostgresHook
 
 
-DAG_ID = "dynamic_postgres_to_postgres_etl_meta_2"
+DAG_ID = "dynamic_postgres_to_postgres_etl_meta_3"
 
 SOURCE_POSTGRES_CONN_ID = "postgres_conn"
 TARGET_POSTGRES_CONN_ID = "postgres_conn"
@@ -176,6 +176,40 @@ with DAG(
     def get_table_configs():
         source_hook = PostgresHook(postgres_conn_id=SOURCE_POSTGRES_CONN_ID)
 
+        insert_etl_param_sql = """
+        insert into etl_param
+        with base_param AS
+        (
+        select
+        yesterday_dt as p_base_dt
+        , yesterday_dt as p_start_dt
+        , yesterday_dt as p_end_dt
+        , bef_max_day as p_bef_max_dt
+        , max_day as p_max_dt
+        from etl_calendar
+        where 1=1
+        and today_dt = TO_CHAR(CURRENT_DATE, 'YYYYMMDD')
+        )
+        select 
+        dag_id
+        , '{"$$p_base_dt":"''' || p_base_dt || 
+        '''","$$p_start_dt":"''' || p_start_dt ||
+        '''","$$p_end_dt":"''' || p_end_dt ||
+        '''","$$p_start_tm":"''' || (input_param::json ->> '$$p_end_tm') ||
+        '''","$$p_end_tm":"''' || to_char(now(), 'YYYYMMDDHH24MISS') ||
+        '''","$$p_bef_max_dt":"''' || p_bef_max_dt ||
+        '''","$$p_max_dt":"''' || p_max_dt ||
+        '''"}' as tobe_param
+        , A.input_param as asis_param
+        , NOW() as created_tm
+        , 'airflow' as create_user_id
+        from etl_meta A, base_param B
+        where 1=1
+        and dag_id = %s
+        and disable_dt = '20991231'
+        and enable_yn = 'Y'
+        """
+
         update_input_param_sql = """
         UPDATE etl_meta a
         SET input_param = b.tobe_param
@@ -216,6 +250,10 @@ with DAG(
             conn = source_hook.get_conn()
             conn.autocommit = False
             cursor = conn.cursor()
+
+            # 0) 현재 DAG_ID 기준 전회차 p_end_tm ~ sysdate 값 기준 etl_param.tobe_param 인서트
+            cursor.execute(insert_etl_param_sql, (DAG_ID,))
+            conn.commit()
 
             # 1) 현재 DAG_ID 기준 최신 tobe_param 으로 etl_meta.input_param 업데이트
             cursor.execute(update_input_param_sql, (DAG_ID,))
