@@ -199,7 +199,7 @@ with DAG(
         '''","$$p_start_dt":"''' || p_start_dt ||
         '''","$$p_end_dt":"''' || p_end_dt ||
         '''","$$p_start_tm":"''' || (input_param::json ->> '$$p_end_tm') ||
-        '''","$$p_end_tm":"''' || to_char(now(), 'YYYYMMDDHH24MISS') ||
+        '''","$$p_end_tm":"''' || to_char(timezone('Asia/Seoul', NOW())::timestamp, 'YYYYMMDDHH24MISS') ||
         '''","$$p_bef_max_dt":"''' || p_bef_max_dt ||
         '''","$$p_max_dt":"''' || p_max_dt ||
         '''"}' as tobe_param
