@@ -8,6 +8,8 @@ from airflow.decorators import task
 from airflow.providers.postgres.hooks.postgres import PostgresHook
 
 
+DAG_ID = "dynamic_postgres_to_postgres_etl_meta_2"
+
 SOURCE_POSTGRES_CONN_ID = "postgres_conn"
 TARGET_POSTGRES_CONN_ID = "postgres_conn"
 
@@ -105,11 +107,6 @@ def parse_column_mapping(raw_mapping: str | None) -> dict[str, str]:
 
 
 def parse_input_params(raw_input_param: str | None) -> dict[str, str]:
-    """
-    input_param JSON 문자열 파싱
-    예:
-    {"$$p_start_dt":"'20260312'","$$p_end_dt":"'20260312'","$$param3":"'test'"}
-    """
     if raw_input_param is None:
         return {}
 
@@ -141,12 +138,6 @@ def parse_input_params(raw_input_param: str | None) -> dict[str, str]:
 
 
 def apply_input_params(sql_text: str | None, input_params: dict[str, str]) -> str:
-    """
-    SQL 템플릿 문자열에 input_param 치환
-    예:
-      sql_text   = "where dt >= $$p_start_dt and col = $$param3"
-      input_params = {"$$p_start_dt":"'20260312'", "$$param3":"'test'"}
-    """
     if sql_text is None:
         return ""
 
@@ -157,7 +148,6 @@ def apply_input_params(sql_text: str | None, input_params: dict[str, str]) -> st
     if not input_params:
         return result
 
-    # 키 길이 역순으로 치환해서 부분 문자열 충돌 가능성 완화
     for key in sorted(input_params.keys(), key=len, reverse=True):
         result = result.replace(key, input_params[key])
 
@@ -175,7 +165,7 @@ def build_limit_0_sql(source_exec_sql: str) -> str:
 
 
 with DAG(
-    dag_id="dynamic_postgres_to_postgres_etl_meta_2",
+    dag_id=DAG_ID,
     start_date=datetime(2024, 1, 1),
     schedule=None,
     catchup=False,
@@ -186,7 +176,20 @@ with DAG(
     def get_table_configs():
         source_hook = PostgresHook(postgres_conn_id=SOURCE_POSTGRES_CONN_ID)
 
-        sql = """
+        update_input_param_sql = """
+        UPDATE etl_meta a
+        SET input_param = b.tobe_param
+        FROM (
+            SELECT dag_id, tobe_param
+            FROM etl_param
+            WHERE dag_id = %s
+            ORDER BY created_tm DESC
+            LIMIT 1
+        ) b
+        WHERE a.dag_id = b.dag_id
+        """
+
+        select_meta_sql = """
         SELECT
             source_table,
             target_table,
@@ -202,9 +205,36 @@ with DAG(
         WHERE 1=1
           AND enable_yn = 'Y'
           AND job_type = 'DAILY'
+          AND dag_id = %s
         """
 
-        rows = source_hook.get_records(sql)
+        conn = None
+        cursor = None
+
+        try:
+            conn = source_hook.get_conn()
+            conn.autocommit = False
+            cursor = conn.cursor()
+
+            # 1) 현재 DAG_ID 기준 최신 tobe_param 으로 etl_meta.input_param 업데이트
+            cursor.execute(update_input_param_sql, (DAG_ID,))
+
+            # 2) 업데이트 후 etl_meta 조회
+            cursor.execute(select_meta_sql, (DAG_ID,))
+            rows = cursor.fetchall()
+
+            conn.commit()
+
+        except Exception:
+            if conn is not None:
+                conn.rollback()
+            raise
+
+        finally:
+            if cursor is not None:
+                cursor.close()
+            if conn is not None:
+                conn.close()
 
         configs = []
 
@@ -296,7 +326,6 @@ with DAG(
                 f"{target_table}: pk_columns is required for load_option [{load_option}]"
             )
 
-        # input_param JSON 파싱 + SQL 템플릿 치환
         input_params = parse_input_params(raw_input_param)
 
         source_exec_sql = apply_input_params(raw_source_exec_sql, input_params)
