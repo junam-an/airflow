@@ -191,7 +191,7 @@ with DAG(
         , max_day as p_max_dt
         from etl_calendar
         where 1=1
-        and today_dt = TO_CHAR(CURRENT_DATE, 'YYYYMMDD')
+        and today_dt = TO_CHAR(timezone('Asia/Seoul', CURRENT_DATE)::timestamp, 'YYYYMMDD')
         )
         select 
         dag_id
@@ -204,7 +204,7 @@ with DAG(
         '''","$$p_max_dt":"''' || p_max_dt ||
         '''"}' as tobe_param
         , A.input_param as asis_param
-        , NOW() as created_tm
+        , timezone('Asia/Seoul', NOW())::timestamp as created_tm
         , 'airflow' as create_user_id
         from etl_meta A, base_param B
         where 1=1
