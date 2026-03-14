@@ -12,6 +12,7 @@ DAG_ID = "dynamic_postgres_to_postgres_etl_meta_2"
 
 SOURCE_POSTGRES_CONN_ID = "postgres_conn"
 TARGET_POSTGRES_CONN_ID = "postgres_conn"
+META_POSTGRES_CONN_ID = "postgres_conn"
 
 CHUNK_SIZE = 5000
 
@@ -174,7 +175,9 @@ with DAG(
 
     @task
     def get_table_configs():
-        source_hook = PostgresHook(postgres_conn_id=SOURCE_POSTGRES_CONN_ID)
+        meta_hook = PostgresHook(postgres_conn_id=META_POSTGRES_CONN_ID)
+
+        meta_hook.run("SET TIME ZONE 'Asia/Seoul'")
 
         update_input_param_sql = """
         UPDATE etl_meta a
@@ -213,7 +216,7 @@ with DAG(
         cursor = None
 
         try:
-            conn = source_hook.get_conn()
+            conn = meta_hook.get_conn()
             conn.autocommit = False
             cursor = conn.cursor()
 
