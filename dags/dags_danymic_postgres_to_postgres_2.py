@@ -180,10 +180,11 @@ with DAG(
         UPDATE etl_meta a
         SET input_param = b.tobe_param
         FROM (
-            SELECT dag_id, tobe_param
+            select dag_id, tobe_param
+            from (SELECT dag_id, tobe_param
             FROM etl_param
             WHERE dag_id = %s
-            ORDER BY created_tm DESC
+            ORDER BY created_tm desc) b
             LIMIT 1
         ) b
         WHERE a.dag_id = b.dag_id
