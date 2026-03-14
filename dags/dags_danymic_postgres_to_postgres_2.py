@@ -11,7 +11,7 @@ from airflow.providers.postgres.hooks.postgres import PostgresHook
 SOURCE_POSTGRES_CONN_ID = "postgres_conn"
 TARGET_POSTGRES_CONN_ID = "postgres_conn"
 
-CHUNK_SIZE = 5000      # 처리할 row fetch size
+CHUNK_SIZE = 5000
 
 
 def parse_csv_columns(raw_value: str | None) -> list[str]:
@@ -103,7 +103,67 @@ def parse_column_mapping(raw_mapping: str | None) -> dict[str, str]:
 
     return result
 
-# 소스 테이블 수행 쿼리 기준 컬럼명 추출
+
+def parse_input_params(raw_input_param: str | None) -> dict[str, str]:
+    """
+    input_param JSON 문자열 파싱
+    예:
+    {"$$p_start_dt":"'20260312'","$$p_end_dt":"'20260312'","$$param3":"'test'"}
+    """
+    if raw_input_param is None:
+        return {}
+
+    raw_input_param = raw_input_param.strip()
+    if not raw_input_param:
+        return {}
+
+    try:
+        parsed = json.loads(raw_input_param)
+    except json.JSONDecodeError as e:
+        raise ValueError(f"Invalid input_param JSON: {raw_input_param}") from e
+
+    if not isinstance(parsed, dict):
+        raise ValueError(
+            f"input_param must be JSON object(dict): {raw_input_param}"
+        )
+
+    result = {}
+    for k, v in parsed.items():
+        key = str(k).strip()
+        val = "" if v is None else str(v)
+
+        if not key:
+            raise ValueError(f"Invalid input_param key: {k}")
+
+        result[key] = val
+
+    return result
+
+
+def apply_input_params(sql_text: str | None, input_params: dict[str, str]) -> str:
+    """
+    SQL 템플릿 문자열에 input_param 치환
+    예:
+      sql_text   = "where dt >= $$p_start_dt and col = $$param3"
+      input_params = {"$$p_start_dt":"'20260312'", "$$param3":"'test'"}
+    """
+    if sql_text is None:
+        return ""
+
+    result = sql_text.strip()
+    if not result:
+        return ""
+
+    if not input_params:
+        return result
+
+    # 키 길이 역순으로 치환해서 부분 문자열 충돌 가능성 완화
+    for key in sorted(input_params.keys(), key=len, reverse=True):
+        result = result.replace(key, input_params[key])
+
+    return result
+
+
 def build_limit_0_sql(source_exec_sql: str) -> str:
     return f"""
         SELECT *
@@ -119,13 +179,13 @@ with DAG(
     start_date=datetime(2024, 1, 1),
     schedule=None,
     catchup=False,
-    max_active_tasks=4 #task 동시 실행 개수 제한
+    max_active_tasks=4,
 ) as dag:
 
     @task
     def get_table_configs():
         source_hook = PostgresHook(postgres_conn_id=SOURCE_POSTGRES_CONN_ID)
-        # 메타 테이블 에서 task 메타 정보 가져 오기
+
         sql = """
         SELECT
             source_table,
@@ -136,7 +196,8 @@ with DAG(
             load_option,
             stg_drop_yn,
             target_pre_sql,
-            target_post_sql
+            target_post_sql,
+            input_param
         FROM etl_meta
         WHERE 1=1
           AND enable_yn = 'Y'
@@ -157,6 +218,7 @@ with DAG(
             stg_drop_yn = (r[6] or "N").strip().upper() if r[6] is not None else "N"
             target_pre_sql = (r[7] or "").strip() if r[7] is not None else ""
             target_post_sql = (r[8] or "").strip() if r[8] is not None else ""
+            input_param = (r[9] or "").strip() if r[9] is not None else ""
 
             if not target_table:
                 raise ValueError("etl_meta.target_table is empty")
@@ -194,27 +256,29 @@ with DAG(
                     "stg_drop_yn": stg_drop_yn,
                     "target_pre_sql": target_pre_sql,
                     "target_post_sql": target_post_sql,
+                    "input_param": input_param,
                 }
             )
 
         return configs
 
-    @task(pool_slots=1) # 태스크별 DB 커넥션 사용 개수 지정
-    def run_etl(table_config: dict): # 가져온 메타 정보 기준 동적으로 태스크 생성 후 실행
+    @task(pool_slots=1)
+    def run_etl(table_config: dict):
         source_table = (table_config.get("source_table") or "").strip()
         target_table = (table_config.get("target_table") or "").strip()
         pk_columns = table_config.get("pk_columns") or []
-        source_exec_sql = (table_config.get("source_exec_sql") or "").strip()
+        raw_source_exec_sql = (table_config.get("source_exec_sql") or "").strip()
         raw_column_mapping = table_config.get("column_mapping")
         load_option = (table_config.get("load_option") or "di").strip().lower()
         stg_drop_yn = (table_config.get("stg_drop_yn") or "N").strip().upper()
-        target_pre_sql = (table_config.get("target_pre_sql") or "").strip()
-        target_post_sql = (table_config.get("target_post_sql") or "").strip()
+        raw_target_pre_sql = (table_config.get("target_pre_sql") or "").strip()
+        raw_target_post_sql = (table_config.get("target_post_sql") or "").strip()
+        raw_input_param = table_config.get("input_param")
 
         if not target_table:
             raise ValueError("table_config.target_table is empty")
 
-        if not source_exec_sql:
+        if not raw_source_exec_sql:
             raise ValueError(f"{target_table}: source_exec_sql is empty")
 
         if load_option not in ("ui", "di", "ti", "i", "u", "d"):
@@ -231,6 +295,16 @@ with DAG(
             raise ValueError(
                 f"{target_table}: pk_columns is required for load_option [{load_option}]"
             )
+
+        # input_param JSON 파싱 + SQL 템플릿 치환
+        input_params = parse_input_params(raw_input_param)
+
+        source_exec_sql = apply_input_params(raw_source_exec_sql, input_params)
+        target_pre_sql = apply_input_params(raw_target_pre_sql, input_params)
+        target_post_sql = apply_input_params(raw_target_post_sql, input_params)
+
+        if not source_exec_sql:
+            raise ValueError(f"{target_table}: source_exec_sql is empty after param replacement")
 
         stg_table = f"stg_{target_table}"
 
