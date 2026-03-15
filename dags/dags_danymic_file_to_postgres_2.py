@@ -482,6 +482,11 @@ with DAG(
 
         full_file_path = str(Path(source_file_dir) / source_file_name)
 
+        print(f"[DEBUG] source_file_dir={source_file_dir}")
+        print(f"[DEBUG] source_file_name={source_file_name}")
+        print(f"[DEBUG] full_file_path={full_file_path}")
+        print(f"[DEBUG] file_exists={Path(full_file_path).exists()}")
+
         stg_table = f"stg_{target_table}"
 
         create_stg_sql = f"""
@@ -540,6 +545,10 @@ with DAG(
                 file_type=source_file_type,
                 text_source_column=text_source_column,
             )
+
+            print(f"[DEBUG] source_columns={source_columns}")
+            print(f"[DEBUG] total_read_rows={len(all_rows)}")
+            print(f"[DEBUG] sample_rows={all_rows[:5]}")
 
             if not source_columns and not all_rows:
                 print(f"{target_table}: source file has no rows [{full_file_path}]")
@@ -636,6 +645,9 @@ with DAG(
                     commit_every=0,
                     executemany=True,
                 )
+
+                stg_count = target_hook.get_first(f"SELECT COUNT(*) FROM {stg_table}")[0]
+                print(f"[DEBUG] stg_count_after_insert={stg_count}")
 
                 total_rows = len(all_rows)
 
