@@ -152,15 +152,6 @@ def apply_input_params(text: str | None, input_params: dict[str, str]) -> str:
 
 
 def normalize_csv_delimiter(raw_delimiter: str | None) -> str:
-    """
-    csv_file_delimiter 값을 실제 구분자로 변환
-    예:
-      ","   -> ","
-      "|"   -> "|"
-      "\\t" -> "\t"
-      "tab" -> "\t"
-      "TAB" -> "\t"
-    """
     if raw_delimiter is None:
         return ","
 
@@ -177,12 +168,11 @@ def normalize_csv_delimiter(raw_delimiter: str | None) -> str:
 
 def normalize_file_encoding(raw_encoding: str | None) -> str:
     """
-    source_file_encoding 값을 실제 파이썬 인코딩명으로 정규화
     허용값:
       - utf-8
       - euc-kr
       - cp949
-    추가 허용 별칭:
+    추가 별칭:
       - utf8  -> utf-8
       - euckr -> euc-kr
       - ms949 -> cp949
@@ -218,13 +208,8 @@ def read_file_all_rows(
     encoding: str = "utf-8",
 ) -> tuple[list[str], list[tuple]]:
     """
-    파일 전체를 한 번에 읽어서
+    파일 1개를 전체 읽어서
     (source_columns, all_rows) 반환
-
-    지원:
-      - csv  : header 필수, csv_file_delimiter 적용
-      - json : JSON array 또는 NDJSON(JSON lines)
-      - text : 1 line = 1 row, 단일 컬럼(text_source_column)
     """
     path = Path(file_path)
 
@@ -257,6 +242,7 @@ def read_file_all_rows(
         if not content:
             raise ValueError(f"JSON file is empty: {file_path}")
 
+        # JSON Array
         if content.startswith("["):
             obj = json.loads(content)
 
@@ -284,6 +270,7 @@ def read_file_all_rows(
 
             return source_columns, all_rows
 
+        # NDJSON
         lines = [line.strip() for line in content.splitlines() if line.strip()]
         if not lines:
             return [], []
@@ -419,7 +406,7 @@ with DAG(
             normalized_source_file_encoding = normalize_file_encoding(source_file_encoding)
 
             if not source_table:
-                raise ValueError("etl_meta_file_to_db.source_table(file_name) is empty")
+                raise ValueError("etl_meta_file_to_db.source_table(file_name/pattern) is empty")
 
             if not target_table:
                 raise ValueError("etl_meta_file_to_db.target_table is empty")
@@ -459,7 +446,7 @@ with DAG(
 
             configs.append(
                 {
-                    "source_table": source_table,
+                    "source_table": source_table,  # 파일명 또는 패턴
                     "target_table": target_table,
                     "pk_columns": pk_columns,
                     "column_mapping": column_mapping,
@@ -480,7 +467,7 @@ with DAG(
 
     @task(pool_slots=1)
     def run_etl(table_config: dict):
-        source_table = (table_config.get("source_table") or "").strip()
+        source_table = (table_config.get("source_table") or "").strip()  # 파일명 또는 패턴
         target_table = (table_config.get("target_table") or "").strip()
         pk_columns = table_config.get("pk_columns") or []
         raw_column_mapping = table_config.get("column_mapping")
@@ -497,7 +484,7 @@ with DAG(
         raw_input_param = table_config.get("input_param")
 
         if not source_table:
-            raise ValueError("table_config.source_table(file_name) is empty")
+            raise ValueError("table_config.source_table(file_name/pattern) is empty")
 
         if not target_table:
             raise ValueError("table_config.target_table is empty")
@@ -538,24 +525,32 @@ with DAG(
         source_pre_cmd = apply_input_params(raw_source_pre_cmd, input_params)
         target_pre_sql = apply_input_params(raw_target_pre_sql, input_params)
         target_post_sql = apply_input_params(raw_target_post_sql, input_params)
-        source_file_name = apply_input_params(source_table, input_params)
+        source_file_pattern = apply_input_params(source_table, input_params)
 
         if source_file_type == "csv" and not normalized_csv_file_delimiter:
             raise ValueError(
                 f"{target_table}: csv_file_delimiter is empty after param replacement"
             )
 
-        full_file_path = str(Path(source_file_dir) / source_file_name)
+        source_dir_path = Path(source_file_dir)
+
+        matched_files = sorted(source_dir_path.glob(source_file_pattern))
 
         print(f"[DEBUG] source_file_dir={source_file_dir}")
-        print(f"[DEBUG] source_file_name={source_file_name}")
-        print(f"[DEBUG] full_file_path={full_file_path}")
-        print(f"[DEBUG] file_exists={Path(full_file_path).exists()}")
+        print(f"[DEBUG] source_file_pattern={source_file_pattern}")
+        print(f"[DEBUG] matched_files={[str(p) for p in matched_files]}")
+        print(f"[DEBUG] matched_file_count={len(matched_files)}")
         print(f"[DEBUG] source_file_type={source_file_type}")
         print(f"[DEBUG] csv_file_delimiter_raw={csv_file_delimiter}")
         print(f"[DEBUG] csv_file_delimiter_normalized={repr(normalized_csv_file_delimiter)}")
         print(f"[DEBUG] source_file_encoding_raw={source_file_encoding}")
         print(f"[DEBUG] source_file_encoding_normalized={normalized_source_file_encoding}")
+
+        if not matched_files:
+            raise FileNotFoundError(
+                f"{target_table}: no source files matched. "
+                f"source_file_dir=[{source_file_dir}], source_table(pattern)=[{source_file_pattern}]"
+            )
 
         stg_table = f"stg_{target_table}"
 
@@ -577,6 +572,7 @@ with DAG(
         job_succeeded = False
 
         try:
+            # 1) source file 읽기 전 OS command 수행
             if source_pre_cmd:
                 completed = subprocess.run(
                     source_pre_cmd,
@@ -590,6 +586,7 @@ with DAG(
                 if completed.stderr:
                     print(completed.stderr)
 
+            # 2) STG 준비
             target_hook.run(create_stg_sql)
             target_hook.run(truncate_stg_sql)
 
@@ -607,126 +604,151 @@ with DAG(
             else:
                 text_source_column = "line_text"
 
-            source_columns, all_rows = read_file_all_rows(
-                file_path=full_file_path,
-                file_type=source_file_type,
-                text_source_column=text_source_column,
-                csv_file_delimiter=normalized_csv_file_delimiter,
-                encoding=normalized_source_file_encoding,
-            )
+            expected_source_columns = None
+            target_columns = None
 
-            print(f"[DEBUG] source_columns={source_columns}")
-            print(f"[DEBUG] total_read_rows={len(all_rows)}")
-            print(f"[DEBUG] sample_rows={all_rows[:5]}")
-
-            if not source_columns and not all_rows:
-                print(f"{target_table}: source file has no rows [{full_file_path}]")
-                source_columns = []
-
-            if source_file_type in ("csv", "json") and not source_columns:
-                raise ValueError(
-                    f"{target_table}: no source columns detected from file [{full_file_path}]"
+            # 3) 여러 파일 -> STG 누적 적재
+            for file_path in matched_files:
+                source_columns, all_rows = read_file_all_rows(
+                    file_path=str(file_path),
+                    file_type=source_file_type,
+                    text_source_column=text_source_column,
+                    csv_file_delimiter=normalized_csv_file_delimiter,
+                    encoding=normalized_source_file_encoding,
                 )
 
-            target_columns = [
-                column_mapping.get(src_col, src_col)
-                for src_col in source_columns
-            ]
+                print(f"[DEBUG] current_file={str(file_path)}")
+                print(f"[DEBUG] source_columns={source_columns}")
+                print(f"[DEBUG] total_read_rows={len(all_rows)}")
+                print(f"[DEBUG] sample_rows={all_rows[:5]}")
 
-            if not target_columns and all_rows:
-                raise ValueError(
-                    f"{target_table}: mapped target_columns is empty"
-                )
+                if not source_columns and not all_rows:
+                    print(f"{target_table}: source file has no rows [{file_path}]")
+                    continue
 
-            if len(set(target_columns)) != len(target_columns):
-                raise ValueError(
-                    f"{target_table}: duplicate target columns detected after mapping. "
-                    f"source_columns={source_columns}, target_columns={target_columns}"
-                )
+                if source_file_type in ("csv", "json") and not source_columns:
+                    raise ValueError(
+                        f"{target_table}: no source columns detected from file [{file_path}]"
+                    )
 
-            missing_pk_columns = [pk for pk in pk_columns if pk not in target_columns]
-            if missing_pk_columns:
-                raise ValueError(
-                    f"{target_table}: mapped result does not include PK columns: "
-                    f"{missing_pk_columns}. "
-                    f"source_columns={source_columns}, target_columns={target_columns}"
-                )
+                # 첫 파일 기준 컬럼 확정
+                if expected_source_columns is None:
+                    expected_source_columns = source_columns
 
-            insert_columns_sql = ", ".join(target_columns)
-            select_columns_sql = ", ".join([f"s.{col}" for col in target_columns])
+                    target_columns = [
+                        column_mapping.get(src_col, src_col)
+                        for src_col in expected_source_columns
+                    ]
 
-            insert_sql = f"""
-                INSERT INTO {target_table} ({insert_columns_sql})
-                SELECT {select_columns_sql}
-                FROM {stg_table} s
-            """
+                    if not target_columns and all_rows:
+                        raise ValueError(
+                            f"{target_table}: mapped target_columns is empty"
+                        )
 
-            pk_join_condition_sql = " AND ".join(
-                [f"t.{pk} = s.{pk}" for pk in pk_columns]
-            )
+                    if len(set(target_columns)) != len(target_columns):
+                        raise ValueError(
+                            f"{target_table}: duplicate target columns detected after mapping. "
+                            f"source_columns={expected_source_columns}, target_columns={target_columns}"
+                        )
 
-            non_pk_columns = [c for c in target_columns if c not in pk_columns]
+                    missing_pk_columns = [
+                        pk for pk in pk_columns if pk not in target_columns
+                    ]
+                    if missing_pk_columns:
+                        raise ValueError(
+                            f"{target_table}: mapped result does not include PK columns: "
+                            f"{missing_pk_columns}. "
+                            f"source_columns={expected_source_columns}, target_columns={target_columns}"
+                        )
 
-            if non_pk_columns:
-                update_set_sql = ", ".join(
-                    [f"{col} = s.{col}" for col in non_pk_columns]
-                )
+                else:
+                    # 여러 파일 컬럼 구조 일치 여부 검증
+                    if source_columns != expected_source_columns:
+                        raise ValueError(
+                            f"{target_table}: source columns mismatch across files. "
+                            f"expected={expected_source_columns}, current={source_columns}, file={file_path}"
+                        )
 
-                update_sql = f"""
-                    UPDATE {target_table} t
-                    SET {update_set_sql}
-                    FROM {stg_table} s
-                    WHERE {pk_join_condition_sql}
-                """
-            else:
-                update_sql = None
+                if all_rows:
+                    target_hook.insert_rows(
+                        table=stg_table,
+                        rows=all_rows,
+                        target_fields=target_columns,
+                        commit_every=max(1, len(all_rows)),
+                        executemany=True,
+                    )
 
-            not_exists_condition_sql = " AND ".join(
-                [f"t.{pk} = s.{pk}" for pk in pk_columns]
-            )
+                    stg_count = target_hook.get_first(
+                        f"SELECT COUNT(*) FROM {stg_table}"
+                    )[0]
 
-            insert_not_exists_sql = f"""
-                INSERT INTO {target_table} ({insert_columns_sql})
-                SELECT {select_columns_sql}
-                FROM {stg_table} s
-                WHERE NOT EXISTS (
-                    SELECT 1
-                    FROM {target_table} t
-                    WHERE {not_exists_condition_sql}
-                )
-            """
+                    total_rows += len(all_rows)
 
-            delete_sql = f"""
-                DELETE FROM {target_table} t
-                WHERE EXISTS (
-                    SELECT 1
-                    FROM {stg_table} s
-                    WHERE {pk_join_condition_sql}
-                )
-            """
+                    print(
+                        f"{file_path} -> {stg_table} "
+                        f"file_rows={len(all_rows)} "
+                        f"total_rows={total_rows} "
+                        f"stg_count_after_insert={stg_count} "
+                        f"source_columns={source_columns} "
+                        f"target_columns={target_columns}"
+                    )
 
-            if all_rows:
-                target_hook.insert_rows(
-                    table=stg_table,
-                    rows=all_rows,
-                    target_fields=target_columns,
-                    commit_every=max(1, len(all_rows)),
-                    executemany=True,
-                )
-
-                stg_count = target_hook.get_first(f"SELECT COUNT(*) FROM {stg_table}")[0]
-                print(f"[DEBUG] stg_count_after_insert={stg_count}")
-
-                total_rows = len(all_rows)
-
-                print(
-                    f"{full_file_path} -> {stg_table} "
-                    f"total={total_rows} "
-                    f"source_columns={source_columns} "
-                    f"target_columns={target_columns}"
-                )
-
+            # STG에 1건 이상 적재된 경우에만 SQL 생성/반영
             if total_rows > 0:
+                insert_columns_sql = ", ".join(target_columns)
+                select_columns_sql = ", ".join([f"s.{col}" for col in target_columns])
+
+                insert_sql = f"""
+                    INSERT INTO {target_table} ({insert_columns_sql})
+                    SELECT {select_columns_sql}
+                    FROM {stg_table} s
+                """
+
+                pk_join_condition_sql = " AND ".join(
+                    [f"t.{pk} = s.{pk}" for pk in pk_columns]
+                )
+
+                non_pk_columns = [c for c in target_columns if c not in pk_columns]
+
+                if non_pk_columns:
+                    update_set_sql = ", ".join(
+                        [f"{col} = s.{col}" for col in non_pk_columns]
+                    )
+
+                    update_sql = f"""
+                        UPDATE {target_table} t
+                        SET {update_set_sql}
+                        FROM {stg_table} s
+                        WHERE {pk_join_condition_sql}
+                    """
+                else:
+                    update_sql = None
+
+                not_exists_condition_sql = " AND ".join(
+                    [f"t.{pk} = s.{pk}" for pk in pk_columns]
+                )
+
+                insert_not_exists_sql = f"""
+                    INSERT INTO {target_table} ({insert_columns_sql})
+                    SELECT {select_columns_sql}
+                    FROM {stg_table} s
+                    WHERE NOT EXISTS (
+                        SELECT 1
+                        FROM {target_table} t
+                        WHERE {not_exists_condition_sql}
+                    )
+                """
+
+                delete_sql = f"""
+                    DELETE FROM {target_table} t
+                    WHERE EXISTS (
+                        SELECT 1
+                        FROM {stg_table} s
+                        WHERE {pk_join_condition_sql}
+                    )
+                """
+
+                # 4) STG -> TARGET
                 target_tx_conn = target_hook.get_conn()
                 target_tx_conn.autocommit = False
                 target_tx_cursor = target_tx_conn.cursor()
@@ -795,7 +817,9 @@ with DAG(
                     raise
 
             else:
-                print(f"{target_table}: no rows read from file, target load skipped")
+                print(
+                    f"{target_table}: no rows read from matched files, target load skipped"
+                )
                 job_succeeded = True
 
         finally:
