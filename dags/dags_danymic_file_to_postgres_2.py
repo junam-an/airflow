@@ -6,7 +6,6 @@ import subprocess
 from datetime import datetime
 from pathlib import Path
 
-
 from airflow import DAG
 from airflow.decorators import task
 from airflow.providers.postgres.hooks.postgres import PostgresHook
@@ -16,7 +15,6 @@ DAG_ID = "dynamic_file_to_postgres_etl_meta_2"
 
 TARGET_POSTGRES_CONN_ID = "postgres_conn"
 META_POSTGRES_CONN_ID = "postgres_conn"
-
 
 
 def parse_csv_columns(raw_value: str | None) -> list[str]:
@@ -170,10 +168,35 @@ def apply_input_params(sql_text: str | None, input_params: dict[str, str]) -> st
     return result
 
 
+def normalize_csv_delimiter(raw_delimiter: str | None) -> str:
+    """
+    csv_file_delimiter 값을 실제 구분자로 변환
+    예:
+      ","   -> ","
+      "|"   -> "|"
+      "\\t" -> "\t"
+      "tab" -> "\t"
+      "TAB" -> "\t"
+    """
+    if raw_delimiter is None:
+        return ","
+
+    delimiter = str(raw_delimiter).strip()
+
+    if not delimiter:
+        return ","
+
+    if delimiter in ("\\t", "tab", "TAB"):
+        return "\t"
+
+    return delimiter
+
+
 def read_file_all_rows(
     file_path: str,
     file_type: str,
     text_source_column: str = "line_text",
+    csv_file_delimiter: str = ",",
     encoding: str = "utf-8",
 ) -> tuple[list[str], list[tuple]]:
     """
@@ -181,7 +204,7 @@ def read_file_all_rows(
     (source_columns, all_rows) 반환
 
     지원:
-      - csv  : header 필수
+      - csv  : header 필수, csv_file_delimiter 적용
       - json : JSON array 또는 NDJSON(JSON lines)
       - text : 1 line = 1 row, 단일 컬럼(text_source_column)
     """
@@ -193,8 +216,10 @@ def read_file_all_rows(
     file_type = file_type.lower().strip()
 
     if file_type == "csv":
+        delimiter = normalize_csv_delimiter(csv_file_delimiter)
+
         with path.open("r", encoding=encoding, newline="") as f:
-            reader = csv.DictReader(f)
+            reader = csv.DictReader(f, delimiter=delimiter)
 
             if not reader.fieldnames:
                 raise ValueError(f"CSV header not found: {file_path}")
@@ -317,6 +342,7 @@ with DAG(
             load_option,
             stg_drop_yn,
             source_file_type,
+            csv_file_delimiter,
             source_file_dir,
             source_pre_cmd,
             target_pre_sql,
@@ -366,11 +392,12 @@ with DAG(
             load_option = (r[4] or "di").strip().lower() if r[4] is not None else "di"
             stg_drop_yn = (r[5] or "N").strip().upper() if r[5] is not None else "N"
             source_file_type = (r[6] or "").strip().lower() if r[6] is not None else ""
-            source_file_dir = (r[7] or "").strip() if r[7] is not None else ""
-            source_pre_cmd = (r[8] or "").strip() if r[8] is not None else ""
-            target_pre_sql = (r[9] or "").strip() if r[9] is not None else ""
-            target_post_sql = (r[10] or "").strip() if r[10] is not None else ""
-            input_param = (r[11] or "").strip() if r[11] is not None else ""
+            csv_file_delimiter = (r[7] or ",") if r[7] is not None else ","
+            source_file_dir = (r[8] or "").strip() if r[8] is not None else ""
+            source_pre_cmd = (r[9] or "").strip() if r[9] is not None else ""
+            target_pre_sql = (r[10] or "").strip() if r[10] is not None else ""
+            target_post_sql = (r[11] or "").strip() if r[11] is not None else ""
+            input_param = (r[12] or "").strip() if r[12] is not None else ""
 
             if not source_table:
                 raise ValueError("etl_meta_file_to_db.source_table(file_name) is empty")
@@ -396,6 +423,11 @@ with DAG(
                     f"Allowed values are json, csv, text."
                 )
 
+            if source_file_type == "csv" and not csv_file_delimiter:
+                raise ValueError(
+                    f"{target_table}: csv_file_delimiter is empty for csv source"
+                )
+
             if not source_file_dir:
                 raise ValueError(
                     f"{target_table}: source_file_dir is empty"
@@ -408,14 +440,15 @@ with DAG(
 
             configs.append(
                 {
-                    "source_table": source_table,   # 파일명
+                    "source_table": source_table,
                     "target_table": target_table,
                     "pk_columns": pk_columns,
                     "column_mapping": column_mapping,
                     "load_option": load_option,
                     "stg_drop_yn": stg_drop_yn,
                     "source_file_type": source_file_type,
-                    "source_file_dir": source_file_dir,  # 디렉터리 경로
+                    "csv_file_delimiter": csv_file_delimiter,
+                    "source_file_dir": source_file_dir,
                     "source_pre_cmd": source_pre_cmd,
                     "target_pre_sql": target_pre_sql,
                     "target_post_sql": target_post_sql,
@@ -427,7 +460,7 @@ with DAG(
 
     @task(pool_slots=1)
     def run_etl(table_config: dict):
-        source_table = (table_config.get("source_table") or "").strip()   # 파일명
+        source_table = (table_config.get("source_table") or "").strip()
         target_table = (table_config.get("target_table") or "").strip()
         pk_columns = table_config.get("pk_columns") or []
         raw_column_mapping = table_config.get("column_mapping")
@@ -435,6 +468,7 @@ with DAG(
         stg_drop_yn = (table_config.get("stg_drop_yn") or "N").strip().upper()
 
         raw_source_file_type = (table_config.get("source_file_type") or "").strip().lower()
+        raw_csv_file_delimiter = str(table_config.get("csv_file_delimiter") or ",")
         raw_source_file_dir = (table_config.get("source_file_dir") or "").strip()
         raw_source_pre_cmd = (table_config.get("source_pre_cmd") or "").strip()
         raw_target_pre_sql = (table_config.get("target_pre_sql") or "").strip()
@@ -473,12 +507,19 @@ with DAG(
         input_params = parse_input_params(raw_input_param)
 
         source_file_type = apply_input_params(raw_source_file_type, input_params).lower()
+        csv_file_delimiter = apply_input_params(raw_csv_file_delimiter, input_params)
+        normalized_csv_file_delimiter = normalize_csv_delimiter(csv_file_delimiter)
+
         source_file_dir = apply_input_params(raw_source_file_dir, input_params)
         source_pre_cmd = apply_input_params(raw_source_pre_cmd, input_params)
         target_pre_sql = apply_input_params(raw_target_pre_sql, input_params)
         target_post_sql = apply_input_params(raw_target_post_sql, input_params)
-
         source_file_name = apply_input_params(source_table, input_params)
+
+        if source_file_type == "csv" and not normalized_csv_file_delimiter:
+            raise ValueError(
+                f"{target_table}: csv_file_delimiter is empty after param replacement"
+            )
 
         full_file_path = str(Path(source_file_dir) / source_file_name)
 
@@ -486,6 +527,9 @@ with DAG(
         print(f"[DEBUG] source_file_name={source_file_name}")
         print(f"[DEBUG] full_file_path={full_file_path}")
         print(f"[DEBUG] file_exists={Path(full_file_path).exists()}")
+        print(f"[DEBUG] source_file_type={source_file_type}")
+        print(f"[DEBUG] csv_file_delimiter_raw={csv_file_delimiter}")
+        print(f"[DEBUG] csv_file_delimiter_normalized={repr(normalized_csv_file_delimiter)}")
 
         stg_table = f"stg_{target_table}"
 
@@ -507,7 +551,6 @@ with DAG(
         job_succeeded = False
 
         try:
-            # 1) source file 읽기 전 OS command 수행
             if source_pre_cmd:
                 completed = subprocess.run(
                     source_pre_cmd,
@@ -521,7 +564,6 @@ with DAG(
                 if completed.stderr:
                     print(completed.stderr)
 
-            # 2) STG 준비
             target_hook.run(create_stg_sql)
             target_hook.run(truncate_stg_sql)
 
@@ -539,11 +581,11 @@ with DAG(
             else:
                 text_source_column = "line_text"
 
-            # 3) 파일 전체 읽기
             source_columns, all_rows = read_file_all_rows(
                 file_path=full_file_path,
                 file_type=source_file_type,
                 text_source_column=text_source_column,
+                csv_file_delimiter=normalized_csv_file_delimiter,
             )
 
             print(f"[DEBUG] source_columns={source_columns}")
@@ -636,7 +678,6 @@ with DAG(
                 )
             """
 
-            # 4) 파일 전체 -> STG 1회 적재
             if all_rows:
                 target_hook.insert_rows(
                     table=stg_table,
@@ -658,7 +699,6 @@ with DAG(
                     f"target_columns={target_columns}"
                 )
 
-            # 5) STG -> TARGET
             if total_rows > 0:
                 target_tx_conn = target_hook.get_conn()
                 target_tx_conn.autocommit = False
