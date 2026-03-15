@@ -20,24 +20,10 @@ META_POSTGRES_CONN_ID = "postgres_conn"
 def parse_csv_columns(raw_value: str | None) -> list[str]:
     if raw_value is None:
         return []
-
     return [c.strip() for c in raw_value.split(",") if c and c.strip()]
 
 
 def parse_column_mapping(raw_mapping: str | None) -> dict[str, str]:
-    """
-    source column -> target column 매핑
-    지원 형식:
-      1) JSON dict
-         {"src_a":"a","src_b":"b"}
-
-      2) JSON list
-         [{"source":"src_a","target":"a"},{"source":"src_b","target":"b"}]
-
-      3) 문자열
-         "src_a:a, src_b:b"
-         "src_a=a, src_b=b"
-    """
     if raw_mapping is None:
         return {}
 
@@ -60,7 +46,6 @@ def parse_column_mapping(raw_mapping: str | None) -> dict[str, str]:
                     )
 
                 result[src] = tgt
-
             return result
 
         if isinstance(parsed, list):
@@ -85,14 +70,12 @@ def parse_column_mapping(raw_mapping: str | None) -> dict[str, str]:
                     )
 
                 result[src] = tgt
-
             return result
 
     except json.JSONDecodeError:
         pass
 
     result = {}
-
     for pair in raw_mapping.split(","):
         pair = pair.strip()
         if not pair:
@@ -151,11 +134,11 @@ def parse_input_params(raw_input_param: str | None) -> dict[str, str]:
     return result
 
 
-def apply_input_params(sql_text: str | None, input_params: dict[str, str]) -> str:
-    if sql_text is None:
+def apply_input_params(text: str | None, input_params: dict[str, str]) -> str:
+    if text is None:
         return ""
 
-    result = sql_text.strip()
+    result = text.strip()
     if not result:
         return ""
 
@@ -190,6 +173,41 @@ def normalize_csv_delimiter(raw_delimiter: str | None) -> str:
         return "\t"
 
     return delimiter
+
+
+def normalize_file_encoding(raw_encoding: str | None) -> str:
+    """
+    source_file_encoding 값을 실제 파이썬 인코딩명으로 정규화
+    허용값:
+      - utf-8
+      - euc-kr
+      - cp949
+    추가 허용 별칭:
+      - utf8  -> utf-8
+      - euckr -> euc-kr
+      - ms949 -> cp949
+    """
+    if raw_encoding is None:
+        return "utf-8"
+
+    encoding = str(raw_encoding).strip().lower()
+
+    if not encoding:
+        return "utf-8"
+
+    if encoding in ("utf8", "utf-8"):
+        return "utf-8"
+
+    if encoding in ("euckr", "euc-kr"):
+        return "euc-kr"
+
+    if encoding in ("cp949", "ms949"):
+        return "cp949"
+
+    raise ValueError(
+        f"Unsupported source_file_encoding: {raw_encoding}. "
+        f"Allowed values are utf-8, euc-kr, cp949."
+    )
 
 
 def read_file_all_rows(
@@ -239,7 +257,6 @@ def read_file_all_rows(
         if not content:
             raise ValueError(f"JSON file is empty: {file_path}")
 
-        # JSON Array
         if content.startswith("["):
             obj = json.loads(content)
 
@@ -267,7 +284,6 @@ def read_file_all_rows(
 
             return source_columns, all_rows
 
-        # NDJSON
         lines = [line.strip() for line in content.splitlines() if line.strip()]
         if not lines:
             return [], []
@@ -343,6 +359,7 @@ with DAG(
             stg_drop_yn,
             source_file_type,
             csv_file_delimiter,
+            source_file_encoding,
             source_file_dir,
             source_pre_cmd,
             target_pre_sql,
@@ -364,7 +381,6 @@ with DAG(
             cursor = conn.cursor()
 
             cursor.execute("SET TIME ZONE 'Asia/Seoul'")
-
             cursor.execute(update_input_param_sql, (DAG_ID,))
             cursor.execute(select_meta_sql, (DAG_ID,))
             rows = cursor.fetchall()
@@ -393,11 +409,14 @@ with DAG(
             stg_drop_yn = (r[5] or "N").strip().upper() if r[5] is not None else "N"
             source_file_type = (r[6] or "").strip().lower() if r[6] is not None else ""
             csv_file_delimiter = (r[7] or ",") if r[7] is not None else ","
-            source_file_dir = (r[8] or "").strip() if r[8] is not None else ""
-            source_pre_cmd = (r[9] or "").strip() if r[9] is not None else ""
-            target_pre_sql = (r[10] or "").strip() if r[10] is not None else ""
-            target_post_sql = (r[11] or "").strip() if r[11] is not None else ""
-            input_param = (r[12] or "").strip() if r[12] is not None else ""
+            source_file_encoding = (r[8] or "utf-8").strip() if r[8] is not None else "utf-8"
+            source_file_dir = (r[9] or "").strip() if r[9] is not None else ""
+            source_pre_cmd = (r[10] or "").strip() if r[10] is not None else ""
+            target_pre_sql = (r[11] or "").strip() if r[11] is not None else ""
+            target_post_sql = (r[12] or "").strip() if r[12] is not None else ""
+            input_param = (r[13] or "").strip() if r[13] is not None else ""
+
+            normalized_source_file_encoding = normalize_file_encoding(source_file_encoding)
 
             if not source_table:
                 raise ValueError("etl_meta_file_to_db.source_table(file_name) is empty")
@@ -448,6 +467,7 @@ with DAG(
                     "stg_drop_yn": stg_drop_yn,
                     "source_file_type": source_file_type,
                     "csv_file_delimiter": csv_file_delimiter,
+                    "source_file_encoding": normalized_source_file_encoding,
                     "source_file_dir": source_file_dir,
                     "source_pre_cmd": source_pre_cmd,
                     "target_pre_sql": target_pre_sql,
@@ -469,6 +489,7 @@ with DAG(
 
         raw_source_file_type = (table_config.get("source_file_type") or "").strip().lower()
         raw_csv_file_delimiter = str(table_config.get("csv_file_delimiter") or ",")
+        raw_source_file_encoding = str(table_config.get("source_file_encoding") or "utf-8")
         raw_source_file_dir = (table_config.get("source_file_dir") or "").strip()
         raw_source_pre_cmd = (table_config.get("source_pre_cmd") or "").strip()
         raw_target_pre_sql = (table_config.get("target_pre_sql") or "").strip()
@@ -510,6 +531,9 @@ with DAG(
         csv_file_delimiter = apply_input_params(raw_csv_file_delimiter, input_params)
         normalized_csv_file_delimiter = normalize_csv_delimiter(csv_file_delimiter)
 
+        source_file_encoding = apply_input_params(raw_source_file_encoding, input_params)
+        normalized_source_file_encoding = normalize_file_encoding(source_file_encoding)
+
         source_file_dir = apply_input_params(raw_source_file_dir, input_params)
         source_pre_cmd = apply_input_params(raw_source_pre_cmd, input_params)
         target_pre_sql = apply_input_params(raw_target_pre_sql, input_params)
@@ -530,6 +554,8 @@ with DAG(
         print(f"[DEBUG] source_file_type={source_file_type}")
         print(f"[DEBUG] csv_file_delimiter_raw={csv_file_delimiter}")
         print(f"[DEBUG] csv_file_delimiter_normalized={repr(normalized_csv_file_delimiter)}")
+        print(f"[DEBUG] source_file_encoding_raw={source_file_encoding}")
+        print(f"[DEBUG] source_file_encoding_normalized={normalized_source_file_encoding}")
 
         stg_table = f"stg_{target_table}"
 
@@ -586,6 +612,7 @@ with DAG(
                 file_type=source_file_type,
                 text_source_column=text_source_column,
                 csv_file_delimiter=normalized_csv_file_delimiter,
+                encoding=normalized_source_file_encoding,
             )
 
             print(f"[DEBUG] source_columns={source_columns}")
