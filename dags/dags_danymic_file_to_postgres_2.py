@@ -642,7 +642,7 @@ with DAG(
                     table=stg_table,
                     rows=all_rows,
                     target_fields=target_columns,
-                    commit_every=0,
+                    commit_every=max(1, len(all_rows)),
                     executemany=True,
                 )
 
