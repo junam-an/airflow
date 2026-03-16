@@ -337,7 +337,7 @@ with DAG(
             target_pre_cmd,
             target_post_cmd,
             input_param
-        FROM etl_meta
+        FROM etl_meta_db_to_file
         WHERE 1=1
           AND enable_yn = 'Y'
           AND dag_id = %s
