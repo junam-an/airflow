@@ -324,16 +324,26 @@ with DAG(
         UPDATE etl_meta_file_to_db a
         SET input_param = b.tobe_param
         FROM (
-            SELECT dag_id, tobe_param
-            FROM (
-                SELECT dag_id, tobe_param
-                FROM etl_param
+            SELECT dag_id, source_table, target_table, tobe_param
+                FROM etl_param a
                 WHERE dag_id = %s
-                ORDER BY created_tm DESC
-            ) x
-            LIMIT 1
+                and (source_table, target_table, created_tm) = (
+                select b.source_table, b.target_table, b.created_tm
+                from 
+                (
+                   SELECT dag_id, source_table, target_table, created_tm
+                   FROM etl_param
+                   WHERE dag_id = a.dag_id
+                   and source_table = a.source_table
+                   and target_table = a.target_table
+                   order by created_tm desc
+                 ) b
+                limit 1
+                )
         ) b
         WHERE a.dag_id = b.dag_id
+        and a.source_table = b.source_table
+        and a.target_table = b.target_table
         """
 
         select_meta_sql = """
