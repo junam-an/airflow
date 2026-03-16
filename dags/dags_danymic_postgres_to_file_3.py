@@ -301,7 +301,7 @@ with DAG(
     start_date=datetime(2024, 1, 1),
     schedule=None,
     catchup=False,
-    max_active_tasks=4,
+    max_active_tasks=1,
 ) as dag:
 
     @task
