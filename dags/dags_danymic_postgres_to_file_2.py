@@ -309,7 +309,7 @@ with DAG(
         meta_hook = PostgresHook(postgres_conn_id=META_POSTGRES_CONN_ID)
 
         update_input_param_sql = """
-        UPDATE etl_meta a
+        UPDATE etl_meta_db_to_file a
         SET input_param = b.tobe_param
         FROM (
             SELECT dag_id, tobe_param
