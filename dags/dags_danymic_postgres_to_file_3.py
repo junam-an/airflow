@@ -324,14 +324,14 @@ with DAG(
         )
         select 
         dag_id
-        , '{"$$p_base_dt":"''' || p_base_dt || 
-        '''","$$p_start_dt":"''' || p_start_dt ||
-        '''","$$p_end_dt":"''' || p_end_dt ||
-        '''","$$p_start_tm":"''' || (input_param::json ->> '$$p_end_tm') ||
-        '''","$$p_end_tm":"''' || to_char(timezone('Asia/Seoul', NOW())::timestamp, 'YYYYMMDDHH24MISS') ||
-        '''","$$p_bef_max_dt":"''' || p_bef_max_dt ||
-        '''","$$p_max_dt":"''' || p_max_dt ||
-        '''"}' as tobe_param
+        , '{"$$p_base_dt":"' || p_base_dt || 
+        '","$$p_start_dt":"' || p_start_dt ||
+        '","$$p_end_dt":"' || p_end_dt ||
+        '","$$p_start_tm":"' || (input_param::json ->> '$$p_end_tm') ||
+        '","$$p_end_tm":"' || to_char(timezone('Asia/Seoul', NOW())::timestamp, 'YYYYMMDDHH24MISS') ||
+        '","$$p_bef_max_dt":"' || p_bef_max_dt ||
+        '","$$p_max_dt":"' || p_max_dt ||
+        '"}' as tobe_param
         , A.input_param as asis_param
         , timezone('Asia/Seoul', NOW())::timestamp as created_tm
         , 'airflow' as create_user_id
