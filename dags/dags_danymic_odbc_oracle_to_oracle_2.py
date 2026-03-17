@@ -11,7 +11,7 @@ from airflow.providers.postgres.hooks.postgres import PostgresHook
 
 DAG_ID = "dynamic_oracle_to_oracle_etl_meta_2"
 
-# 메타 테이블은 기존과 동일하게 PostgreSQL 사용
+# 메타 테이블 저장소
 META_POSTGRES_CONN_ID = "postgres_conn"
 
 CHUNK_SIZE = 5000
@@ -306,6 +306,35 @@ def build_merge_update_sql(
     """
 
 
+def build_stg_insert_sql(stg_table: str, target_columns: list[str]) -> str:
+    columns_sql = ", ".join(target_columns)
+    bind_sql = ", ".join(["?"] * len(target_columns))
+
+    return f"""
+        INSERT INTO {stg_table} ({columns_sql})
+        VALUES ({bind_sql})
+    """
+
+
+def normalize_rows_for_odbc(rows: list[tuple], column_count: int) -> list[tuple]:
+    normalized = []
+
+    for row in rows:
+        if row is None:
+            continue
+
+        new_row = tuple(row)
+
+        if len(new_row) != column_count:
+            raise ValueError(
+                f"Row column count mismatch. expected={column_count}, actual={len(new_row)}, row={new_row}"
+            )
+
+        normalized.append(new_row)
+
+    return normalized
+
+
 with DAG(
     dag_id=DAG_ID,
     start_date=datetime(2024, 1, 1),
@@ -373,10 +402,7 @@ with DAG(
             conn.autocommit = False
             cursor = conn.cursor()
 
-            # 1) 현재 DAG_ID 기준 최신 tobe_param 으로 etl_meta.input_param 업데이트
             cursor.execute(update_input_param_sql, (DAG_ID,))
-
-            # 2) 업데이트 후 etl_meta 조회
             cursor.execute(select_meta_sql, (DAG_ID,))
             rows = cursor.fetchall()
 
@@ -517,12 +543,12 @@ with DAG(
         target_post_sql = apply_input_params(raw_target_post_sql, input_params)
 
         if not source_exec_sql:
-            raise ValueError(f"{target_table}: source_exec_sql is empty after param replacement")
+            raise ValueError(
+                f"{target_table}: source_exec_sql is empty after param replacement"
+            )
 
         stg_table = f"STG_{target_table}"
 
-        # Oracle STG 테이블은 PK/제약조건 없이 생성
-        # CTAS + WHERE 1=0 사용
         drop_stg_sql = f"DROP TABLE {stg_table}"
         create_stg_sql = f"""
             CREATE TABLE {stg_table}
@@ -531,7 +557,6 @@ with DAG(
             FROM {target_table}
             WHERE 1 = 0
         """
-        truncate_stg_sql = f"TRUNCATE TABLE {stg_table}"
         truncate_target_sql = f"TRUNCATE TABLE {target_table}"
 
         source_hook = OdbcHook(odbc_conn_id=source_conn_name)
@@ -541,6 +566,9 @@ with DAG(
         meta_cursor = None
         source_cursor = None
 
+        target_stg_conn = None
+        target_stg_cursor = None
+
         target_tx_conn = None
         target_tx_cursor = None
 
@@ -548,7 +576,6 @@ with DAG(
         job_succeeded = False
 
         try:
-            # STG 재생성
             try:
                 target_hook.run(drop_stg_sql)
                 print(f"{stg_table} dropped before recreate")
@@ -630,6 +657,17 @@ with DAG(
                 pk_columns=pk_columns,
             )
 
+            stg_insert_sql = build_stg_insert_sql(stg_table, target_columns)
+
+            target_stg_conn = target_hook.get_conn()
+            target_stg_conn.autocommit = False
+            target_stg_cursor = target_stg_conn.cursor()
+
+            try:
+                target_stg_cursor.fast_executemany = True
+            except Exception:
+                pass
+
             source_cursor = source_conn.cursor()
             source_cursor.arraysize = CHUNK_SIZE
             source_cursor.execute(source_exec_sql)
@@ -640,22 +678,30 @@ with DAG(
                 if not rows:
                     break
 
-                target_hook.insert_rows(
-                    table=stg_table,
+                normalized_rows = normalize_rows_for_odbc(
                     rows=rows,
-                    target_fields=target_columns,
-                    commit_every=CHUNK_SIZE,
-                    executemany=True,
+                    column_count=len(target_columns),
                 )
 
-                total_rows += len(rows)
+                if not normalized_rows:
+                    continue
+
+                target_stg_cursor.executemany(stg_insert_sql, normalized_rows)
+                target_stg_conn.commit()
+
+                total_rows += len(normalized_rows)
 
                 print(
                     f"{source_table or '[source_sql]'} -> {stg_table} "
-                    f"chunk={len(rows)} total={total_rows} "
+                    f"chunk={len(normalized_rows)} total={total_rows} "
                     f"source_columns={source_columns} "
                     f"target_columns={target_columns}"
                 )
+
+            target_stg_cursor.close()
+            target_stg_cursor = None
+            target_stg_conn.close()
+            target_stg_conn = None
 
             if total_rows > 0:
                 target_tx_conn = target_hook.get_conn()
@@ -734,6 +780,12 @@ with DAG(
 
             if source_conn is not None:
                 source_conn.close()
+
+            if target_stg_cursor is not None:
+                target_stg_cursor.close()
+
+            if target_stg_conn is not None:
+                target_stg_conn.close()
 
             if target_tx_cursor is not None:
                 target_tx_cursor.close()
