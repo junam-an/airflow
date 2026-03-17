@@ -527,14 +527,14 @@ with DAG(
                 f"{target_table}: pk_columns is required for load_option [{load_option}]"
             )
 
-        source_conn_name = str(config_option.get("source_conn_name", "")).strip()
-        target_conn_name = str(config_option.get("target_conn_name", "")).strip()
+        source_conn_name = str(config_option.get("SOURCE_CONN_NAME", "")).strip()
+        target_conn_name = str(config_option.get("TARGET_CONN_NAME", "")).strip()
 
         if not source_conn_name:
-            raise ValueError(f"{target_table}: source_conn_name is empty")
+            raise ValueError(f"{target_table}: SOURCE_CONN_NAME is empty")
 
         if not target_conn_name:
-            raise ValueError(f"{target_table}: target_conn_name is empty")
+            raise ValueError(f"{target_table}: TARGET_CONN_NAME is empty")
 
         input_params = parse_input_params(raw_input_param)
 
