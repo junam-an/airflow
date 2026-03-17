@@ -368,14 +368,14 @@ with DAG(
         DAG_ID
         , A.SOURCE_TABLE
         , A.TARGET_TABLE
-        , '{"$$P_BASE_DT":"''' || P_BASE_DT || 
-        '''","$$P_START_DT":"''' || P_START_DT ||
-        '''","$$P_END_DT":"''' || P_END_DT ||
-        '''","$$P_START_TM":"''' || (INPUT_PARAM::JSON ->> '$$P_END_TM') ||
-        '''","$$P_END_TM":"''' || TO_CHAR(TIMEZONE('ASIA/SEOUL', NOW())::TIMESTAMP, 'YYYYMMDDHH24MISS') ||
-        '''","$$P_BEF_MAX_DT":"''' || P_BEF_MAX_DT ||
-        '''","$$P_MAX_DT":"''' || P_MAX_DT ||
-        '''"}' AS TOBE_PARAM
+        , '{"$$P_BASE_DT":"' || P_BASE_DT || 
+        '","$$P_START_DT":"' || P_START_DT ||
+        '","$$P_END_DT":"' || P_END_DT ||
+        '","$$P_START_TM":"' || (INPUT_PARAM::JSON ->> '$$P_END_TM') ||
+        '","$$P_END_TM":"' || TO_CHAR(TIMEZONE('ASIA/SEOUL', NOW())::TIMESTAMP, 'YYYYMMDDHH24MISS') ||
+        '","$$P_BEF_MAX_DT":"' || P_BEF_MAX_DT ||
+        '","$$P_MAX_DT":"' || P_MAX_DT ||
+        '"}' AS TOBE_PARAM
         , A.INPUT_PARAM AS ASIS_PARAM
         , TIMEZONE('ASIA/SEOUL', NOW())::TIMESTAMP AS CREATED_TM
         , 'AIRFLOW' AS CREATE_USER_ID
