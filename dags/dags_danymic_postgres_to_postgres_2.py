@@ -180,17 +180,29 @@ with DAG(
         meta_hook.run("SET TIME ZONE 'Asia/Seoul'")
 
         update_input_param_sql = """
-        UPDATE etl_meta a
+        UPDATE etl_meta_db_to_db a
         SET input_param = b.tobe_param
         FROM (
-            select dag_id, tobe_param
-            from (SELECT dag_id, tobe_param
-            FROM etl_param
-            WHERE dag_id = %s
-            ORDER BY created_tm desc) b
-            LIMIT 1
+            SELECT dag_id, source_table, target_table, tobe_param
+                FROM etl_param a
+                WHERE dag_id = %s
+                and (source_table, target_table, created_tm) = (
+                select b.source_table, b.target_table, b.created_tm
+                from 
+                (
+                   SELECT dag_id, source_table, target_table, created_tm
+                   FROM etl_param
+                   WHERE dag_id = a.dag_id
+                   and source_table = a.source_table
+                   and target_table = a.target_table
+                   order by created_tm desc
+                 ) b
+                limit 1
+                )
         ) b
         WHERE a.dag_id = b.dag_id
+        and a.source_table = b.source_table
+        and a.target_table = b.target_table
         """
 
         select_meta_sql = """
@@ -205,7 +217,7 @@ with DAG(
             target_pre_sql,
             target_post_sql,
             input_param
-        FROM etl_meta
+        FROM etl_meta_db_to_db
         WHERE 1=1
           AND enable_yn = 'Y'
           AND dag_id = %s

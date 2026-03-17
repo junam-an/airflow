@@ -9,7 +9,7 @@ from airflow.providers.odbc.hooks.odbc import OdbcHook
 from airflow.providers.postgres.hooks.postgres import PostgresHook
 
 
-DAG_ID = "dynamic_oracle_to_oracle_etl_meta_2"
+DAG_ID = "DYNAMIC_ORACLE_TO_ORACLE_ETL_META_2"
 
 # 메타 테이블 저장소
 META_POSTGRES_CONN_ID = "postgres_conn"
