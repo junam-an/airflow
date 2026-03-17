@@ -461,17 +461,17 @@ with DAG(
 
             parsed_config = parse_config_option(config_option)
 
-            source_conn_name = parsed_config.get("source_conn_name", "").strip()
-            target_conn_name = parsed_config.get("target_conn_name", "").strip()
+            source_conn_name = parsed_config.get("SOURCE_CONN_NAME", "").strip()
+            target_conn_name = parsed_config.get("TARGET_CONN_NAME", "").strip()
 
             if not source_conn_name:
                 raise ValueError(
-                    f"{target_table}: config_option.source_conn_name is empty"
+                    f"{target_table}: config_option.SOURCE_CONN_NAME is empty"
                 )
 
             if not target_conn_name:
                 raise ValueError(
-                    f"{target_table}: config_option.target_conn_name is empty"
+                    f"{target_table}: config_option.TARGET_CONN_NAME is empty"
                 )
 
             configs.append(
