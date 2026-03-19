@@ -8,10 +8,8 @@ from airflow.decorators import task
 from airflow.providers.postgres.hooks.postgres import PostgresHook
 
 
-DAG_ID = "dynamic_postgres_to_postgres_etl_meta_2"
+DAG_ID = "DYNAMIC_POSTGRES_TO_POSTGRES_ETL_META_2"
 
-SOURCE_POSTGRES_CONN_ID = "postgres_conn"
-TARGET_POSTGRES_CONN_ID = "postgres_conn"
 META_POSTGRES_CONN_ID = "postgres_conn"
 
 CHUNK_SIZE = 5000
@@ -138,6 +136,39 @@ def parse_input_params(raw_input_param: str | None) -> dict[str, str]:
     return result
 
 
+def parse_config_option(raw_config_option: str | None) -> dict[str, str]:
+    if raw_config_option is None:
+        return {}
+
+    raw_config_option = raw_config_option.strip()
+    if not raw_config_option:
+        return {}
+
+    try:
+        parsed = json.loads(raw_config_option)
+    except json.JSONDecodeError as e:
+        raise ValueError(
+            f"Invalid config_option JSON: {raw_config_option}"
+        ) from e
+
+    if not isinstance(parsed, dict):
+        raise ValueError(
+            f"config_option must be JSON object(dict): {raw_config_option}"
+        )
+
+    result = {}
+    for k, v in parsed.items():
+        key = str(k).strip()
+        val = "" if v is None else str(v).strip()
+
+        if not key:
+            raise ValueError(f"Invalid config_option key: {k}")
+
+        result[key] = val
+
+    return result
+
+
 def apply_input_params(sql_text: str | None, input_params: dict[str, str]) -> str:
     if sql_text is None:
         return ""
@@ -216,6 +247,7 @@ with DAG(
             stg_drop_yn,
             target_pre_sql,
             target_post_sql,
+            config_option,
             input_param
         FROM etl_meta_db_to_db
         WHERE 1=1
@@ -231,6 +263,10 @@ with DAG(
             conn = meta_hook.get_conn()
             conn.autocommit = False
             cursor = conn.cursor()
+
+            # 0) 현재 DAG_ID 기준 전회차 p_end_tm ~ sysdate 값 기준 etl_param.tobe_param 인서트
+            cursor.execute(insert_etl_param_sql, (DAG_ID,))
+            conn.commit()
 
             # 1) 현재 DAG_ID 기준 최신 tobe_param 으로 etl_meta.input_param 업데이트
             cursor.execute(update_input_param_sql, (DAG_ID,))
@@ -264,7 +300,8 @@ with DAG(
             stg_drop_yn = (r[6] or "N").strip().upper() if r[6] is not None else "N"
             target_pre_sql = (r[7] or "").strip() if r[7] is not None else ""
             target_post_sql = (r[8] or "").strip() if r[8] is not None else ""
-            input_param = (r[9] or "").strip() if r[9] is not None else ""
+            config_option = (r[9] or "").strip() if r[9] is not None else ""
+            input_param = (r[10] or "").strip() if r[10] is not None else ""
 
             if not target_table:
                 raise ValueError("etl_meta.target_table is empty")
@@ -302,6 +339,7 @@ with DAG(
                     "stg_drop_yn": stg_drop_yn,
                     "target_pre_sql": target_pre_sql,
                     "target_post_sql": target_post_sql,
+                    "config_option": config_option,
                     "input_param": input_param,
                 }
             )
@@ -319,6 +357,7 @@ with DAG(
         stg_drop_yn = (table_config.get("stg_drop_yn") or "N").strip().upper()
         raw_target_pre_sql = (table_config.get("target_pre_sql") or "").strip()
         raw_target_post_sql = (table_config.get("target_post_sql") or "").strip()
+        raw_config_option = table_config.get("config_option")
         raw_input_param = table_config.get("input_param")
 
         if not target_table:
@@ -342,6 +381,21 @@ with DAG(
                 f"{target_table}: pk_columns is required for load_option [{load_option}]"
             )
 
+        config_option = parse_config_option(raw_config_option)
+
+        source_conn_name = (config_option.get("SOURCE_CONN_NAME") or "").strip()
+        target_conn_name = (config_option.get("TARGET_CONN_NAME") or "").strip()
+
+        if not source_conn_name:
+            raise ValueError(
+                f"{target_table}: config_option.SOURCE_CONN_NAME is empty"
+            )
+
+        if not target_conn_name:
+            raise ValueError(
+                f"{target_table}: config_option.TARGET_CONN_NAME is empty"
+            )
+
         input_params = parse_input_params(raw_input_param)
 
         source_exec_sql = apply_input_params(raw_source_exec_sql, input_params)
@@ -362,8 +416,8 @@ with DAG(
         truncate_target_sql = f"TRUNCATE TABLE {target_table}"
         drop_stg_sql = f"DROP TABLE IF EXISTS {stg_table}"
 
-        source_hook = PostgresHook(postgres_conn_id=SOURCE_POSTGRES_CONN_ID)
-        target_hook = PostgresHook(postgres_conn_id=TARGET_POSTGRES_CONN_ID)
+        source_hook = PostgresHook(postgres_conn_id=source_conn_name)
+        target_hook = PostgresHook(postgres_conn_id=target_conn_name)
 
         source_conn = None
         meta_cursor = None

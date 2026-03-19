@@ -11,9 +11,8 @@ from airflow.decorators import task
 from airflow.providers.postgres.hooks.postgres import PostgresHook
 
 
-DAG_ID = "dynamic_postgres_to_file_etl_meta_2"
+DAG_ID = "DYNAMIC_POSTGRES_TO_FILE_ETL_META_2"
 
-SOURCE_POSTGRES_CONN_ID = "postgres_conn"
 META_POSTGRES_CONN_ID = "postgres_conn"
 
 
@@ -121,6 +120,39 @@ def parse_input_params(raw_input_param: str | None) -> dict[str, str]:
 
         if not key:
             raise ValueError(f"Invalid input_param key: {k}")
+
+        result[key] = val
+
+    return result
+
+
+def parse_config_option(raw_config_option: str | None) -> dict[str, str]:
+    if raw_config_option is None:
+        return {}
+
+    raw_config_option = raw_config_option.strip()
+    if not raw_config_option:
+        return {}
+
+    try:
+        parsed = json.loads(raw_config_option)
+    except json.JSONDecodeError as e:
+        raise ValueError(
+            f"Invalid config_option JSON: {raw_config_option}"
+        ) from e
+
+    if not isinstance(parsed, dict):
+        raise ValueError(
+            f"config_option must be JSON object(dict): {raw_config_option}"
+        )
+
+    result = {}
+    for k, v in parsed.items():
+        key = str(k).strip()
+        val = "" if v is None else str(v).strip()
+
+        if not key:
+            raise ValueError(f"Invalid config_option key: {k}")
 
         result[key] = val
 
@@ -346,6 +378,7 @@ with DAG(
             target_file_dir,
             target_pre_cmd,
             target_post_cmd,
+            config_option,
             input_param
         FROM etl_meta_db_to_file
         WHERE 1=1
@@ -394,7 +427,8 @@ with DAG(
             target_file_dir = (r[7] or "").strip() if r[7] is not None else ""
             target_pre_cmd = (r[8] or "").strip() if r[8] is not None else ""
             target_post_cmd = (r[9] or "").strip() if r[9] is not None else ""
-            input_param = (r[10] or "").strip() if r[10] is not None else ""
+            config_option = (r[10] or "").strip() if r[10] is not None else ""
+            input_param = (r[11] or "").strip() if r[11] is not None else ""
 
             normalized_target_file_encoding = normalize_file_encoding(target_file_encoding)
 
@@ -437,6 +471,7 @@ with DAG(
                     "target_file_dir": target_file_dir,
                     "target_pre_cmd": target_pre_cmd,
                     "target_post_cmd": target_post_cmd,
+                    "config_option": config_option,
                     "input_param": input_param,
                 }
             )
@@ -455,6 +490,7 @@ with DAG(
         raw_target_file_dir = (table_config.get("target_file_dir") or "").strip()
         raw_target_pre_cmd = (table_config.get("target_pre_cmd") or "").strip()
         raw_target_post_cmd = (table_config.get("target_post_cmd") or "").strip()
+        raw_config_option = table_config.get("config_option")
         raw_input_param = table_config.get("input_param")
 
         if not raw_target_file_name:
@@ -470,6 +506,14 @@ with DAG(
 
         if not raw_target_file_dir:
             raise ValueError(f"{raw_target_file_name}: target_file_dir is empty")
+
+        config_option = parse_config_option(raw_config_option)
+        source_conn_name = (config_option.get("SOURCE_CONN_NAME") or "").strip()
+
+        if not source_conn_name:
+            raise ValueError(
+                f"{raw_target_file_name}: config_option.SOURCE_CONN_NAME is empty"
+            )
 
         input_params = parse_input_params(raw_input_param)
 
@@ -500,6 +544,7 @@ with DAG(
         full_target_file_path = str(Path(target_file_dir) / target_file_name)
 
         print(f"[DEBUG] source_table={source_table}")
+        print(f"[DEBUG] source_conn_name={source_conn_name}")
         print(f"[DEBUG] target_file_name={target_file_name}")
         print(f"[DEBUG] target_file_dir={target_file_dir}")
         print(f"[DEBUG] full_target_file_path={full_target_file_path}")
@@ -509,7 +554,7 @@ with DAG(
         print(f"[DEBUG] target_file_encoding_raw={target_file_encoding}")
         print(f"[DEBUG] target_file_encoding_normalized={normalized_target_file_encoding}")
 
-        source_hook = PostgresHook(postgres_conn_id=SOURCE_POSTGRES_CONN_ID)
+        source_hook = PostgresHook(postgres_conn_id=source_conn_name)
 
         source_conn = None
         meta_cursor = None
@@ -571,7 +616,6 @@ with DAG(
                     f"source_columns={source_columns}, target_columns={target_columns}"
                 )
 
-            # text 파일은 1컬럼만 허용
             if target_file_type == "text" and len(target_columns) != 1:
                 raise ValueError(
                     f"{target_file_name}: text target requires exactly one column. "
@@ -588,7 +632,7 @@ with DAG(
             print(f"[DEBUG] total_fetched_rows={len(rows)}")
             print(f"[DEBUG] sample_rows={rows[:5]}")
 
-            # 4) 파일 생성 (replace 방식: w 모드)
+            # 4) 파일 생성
             if target_file_type == "csv":
                 write_csv_file(
                     file_path=full_target_file_path,

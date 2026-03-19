@@ -11,9 +11,8 @@ from airflow.decorators import task
 from airflow.providers.postgres.hooks.postgres import PostgresHook
 
 
-DAG_ID = "dynamic_postgres_to_file_etl_meta_3"
+DAG_ID = "DYNAMIC_POSTGRES_TO_FILE_ETL_META_3"
 
-SOURCE_POSTGRES_CONN_ID = "postgres_conn"
 META_POSTGRES_CONN_ID = "postgres_conn"
 
 
@@ -121,6 +120,39 @@ def parse_input_params(raw_input_param: str | None) -> dict[str, str]:
 
         if not key:
             raise ValueError(f"Invalid input_param key: {k}")
+
+        result[key] = val
+
+    return result
+
+
+def parse_config_option(raw_config_option: str | None) -> dict[str, str]:
+    if raw_config_option is None:
+        return {}
+
+    raw_config_option = raw_config_option.strip()
+    if not raw_config_option:
+        return {}
+
+    try:
+        parsed = json.loads(raw_config_option)
+    except json.JSONDecodeError as e:
+        raise ValueError(
+            f"Invalid config_option JSON: {raw_config_option}"
+        ) from e
+
+    if not isinstance(parsed, dict):
+        raise ValueError(
+            f"config_option must be JSON object(dict): {raw_config_option}"
+        )
+
+    result = {}
+    for k, v in parsed.items():
+        key = str(k).strip()
+        val = "" if v is None else str(v).strip()
+
+        if not key:
+            raise ValueError(f"Invalid config_option key: {k}")
 
         result[key] = val
 
@@ -301,7 +333,7 @@ with DAG(
     start_date=datetime(2024, 1, 1),
     schedule=None,
     catchup=False,
-    max_active_tasks=1,
+    max_active_tasks=4,
 ) as dag:
 
     @task
@@ -309,39 +341,39 @@ with DAG(
         meta_hook = PostgresHook(postgres_conn_id=META_POSTGRES_CONN_ID)
 
         insert_etl_param_sql = """
-        insert into etl_param
-        with base_param AS
+        INSERT INTO ETL_PARAM
+        WITH BASE_PARAM AS
         (
-        select
-        yesterday_dt as p_base_dt
-        , yesterday_dt as p_start_dt
-        , yesterday_dt as p_end_dt
-        , bef_max_day as p_bef_max_dt
-        , max_day as p_max_dt
-        from etl_calendar
-        where 1=1
-        and today_dt = TO_CHAR(timezone('Asia/Seoul', CURRENT_DATE)::timestamp, 'YYYYMMDD')
+        SELECT
+        YESTERDAY_DT AS P_BASE_DT
+        , YESTERDAY_DT AS P_START_DT
+        , YESTERDAY_DT AS P_END_DT
+        , BEF_MAX_DAY AS P_BEF_MAX_DT
+        , MAX_DAY AS P_MAX_DT
+        FROM ETL_CALENDAR
+        WHERE 1=1
+        AND TODAY_DT = TO_CHAR(TIMEZONE('ASIA/SEOUL', CURRENT_DATE)::TIMESTAMP, 'YYYYMMDD')
         )
-        select 
-        dag_id
-        , A.source_table
-        , A.target_table
-        , '{"$$p_base_dt":"' || p_base_dt || 
-        '","$$p_start_dt":"' || p_start_dt ||
-        '","$$p_end_dt":"' || p_end_dt ||
-        '","$$p_start_tm":"' || (input_param::json ->> '$$p_end_tm') ||
-        '","$$p_end_tm":"' || to_char(timezone('Asia/Seoul', NOW())::timestamp, 'YYYYMMDDHH24MISS') ||
-        '","$$p_bef_max_dt":"' || p_bef_max_dt ||
-        '","$$p_max_dt":"' || p_max_dt ||
-        '"}' as tobe_param
-        , A.input_param as asis_param
-        , timezone('Asia/Seoul', NOW())::timestamp as created_tm
-        , 'airflow' as create_user_id
-        from etl_meta_db_to_file A, base_param B
-        where 1=1
-        and dag_id = %s
-        and disable_dt = '20991231'
-        and enable_yn = 'Y'
+        SELECT 
+        DAG_ID
+        , A.SOURCE_TABLE
+        , A.TARGET_TABLE
+        , '{"$$P_BASE_DT":"' || P_BASE_DT || 
+        '","$$P_START_DT":"' || P_START_DT ||
+        '","$$P_END_DT":"' || P_END_DT ||
+        '","$$P_START_TM":"' || (INPUT_PARAM::JSON ->> '$$P_END_TM') ||
+        '","$$P_END_TM":"' || TO_CHAR(TIMEZONE('ASIA/SEOUL', NOW())::TIMESTAMP, 'YYYYMMDDHH24MISS') ||
+        '","$$P_BEF_MAX_DT":"' || P_BEF_MAX_DT ||
+        '","$$P_MAX_DT":"' || P_MAX_DT ||
+        '"}' AS TOBE_PARAM
+        , A.INPUT_PARAM AS ASIS_PARAM
+        , TIMEZONE('ASIA/SEOUL', NOW())::TIMESTAMP AS CREATED_TM
+        , 'AIRFLOW' AS CREATE_USER_ID
+        FROM ETL_META_DB_TO_FILE A, BASE_PARAM B
+        WHERE 1=1
+        AND DAG_ID = %s
+        AND DISABLE_DT = '20991231'
+        AND ENABLE_YN = 'Y'
         """
 
         update_input_param_sql = """
@@ -382,6 +414,7 @@ with DAG(
             target_file_dir,
             target_pre_cmd,
             target_post_cmd,
+            config_option,
             input_param
         FROM etl_meta_db_to_file
         WHERE 1=1
@@ -400,7 +433,6 @@ with DAG(
 
             cursor.execute("SET TIME ZONE 'Asia/Seoul'")
 
-            # 0) 현재 DAG_ID 기준 전회차 p_end_tm ~ sysdate 값 기준 etl_param.tobe_param 인서트
             cursor.execute(insert_etl_param_sql, (DAG_ID,))
             conn.commit()
 
@@ -434,7 +466,8 @@ with DAG(
             target_file_dir = (r[7] or "").strip() if r[7] is not None else ""
             target_pre_cmd = (r[8] or "").strip() if r[8] is not None else ""
             target_post_cmd = (r[9] or "").strip() if r[9] is not None else ""
-            input_param = (r[10] or "").strip() if r[10] is not None else ""
+            config_option = (r[10] or "").strip() if r[10] is not None else ""
+            input_param = (r[11] or "").strip() if r[11] is not None else ""
 
             normalized_target_file_encoding = normalize_file_encoding(target_file_encoding)
 
@@ -477,6 +510,7 @@ with DAG(
                     "target_file_dir": target_file_dir,
                     "target_pre_cmd": target_pre_cmd,
                     "target_post_cmd": target_post_cmd,
+                    "config_option": config_option,
                     "input_param": input_param,
                 }
             )
@@ -495,6 +529,7 @@ with DAG(
         raw_target_file_dir = (table_config.get("target_file_dir") or "").strip()
         raw_target_pre_cmd = (table_config.get("target_pre_cmd") or "").strip()
         raw_target_post_cmd = (table_config.get("target_post_cmd") or "").strip()
+        raw_config_option = table_config.get("config_option")
         raw_input_param = table_config.get("input_param")
 
         if not raw_target_file_name:
@@ -510,6 +545,14 @@ with DAG(
 
         if not raw_target_file_dir:
             raise ValueError(f"{raw_target_file_name}: target_file_dir is empty")
+
+        config_option = parse_config_option(raw_config_option)
+        source_conn_name = (config_option.get("SOURCE_CONN_NAME") or "").strip()
+
+        if not source_conn_name:
+            raise ValueError(
+                f"{raw_target_file_name}: config_option.SOURCE_CONN_NAME is empty"
+            )
 
         input_params = parse_input_params(raw_input_param)
 
@@ -540,6 +583,7 @@ with DAG(
         full_target_file_path = str(Path(target_file_dir) / target_file_name)
 
         print(f"[DEBUG] source_table={source_table}")
+        print(f"[DEBUG] source_conn_name={source_conn_name}")
         print(f"[DEBUG] target_file_name={target_file_name}")
         print(f"[DEBUG] target_file_dir={target_file_dir}")
         print(f"[DEBUG] full_target_file_path={full_target_file_path}")
@@ -549,7 +593,7 @@ with DAG(
         print(f"[DEBUG] target_file_encoding_raw={target_file_encoding}")
         print(f"[DEBUG] target_file_encoding_normalized={normalized_target_file_encoding}")
 
-        source_hook = PostgresHook(postgres_conn_id=SOURCE_POSTGRES_CONN_ID)
+        source_hook = PostgresHook(postgres_conn_id=source_conn_name)
 
         source_conn = None
         meta_cursor = None
@@ -611,7 +655,6 @@ with DAG(
                     f"source_columns={source_columns}, target_columns={target_columns}"
                 )
 
-            # text 파일은 1컬럼만 허용
             if target_file_type == "text" and len(target_columns) != 1:
                 raise ValueError(
                     f"{target_file_name}: text target requires exactly one column. "
@@ -628,7 +671,7 @@ with DAG(
             print(f"[DEBUG] total_fetched_rows={len(rows)}")
             print(f"[DEBUG] sample_rows={rows[:5]}")
 
-            # 4) 파일 생성 (replace 방식: w 모드)
+            # 4) 파일 생성
             if target_file_type == "csv":
                 write_csv_file(
                     file_path=full_target_file_path,

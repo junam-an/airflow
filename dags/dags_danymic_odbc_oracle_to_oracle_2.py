@@ -316,6 +316,20 @@ def build_stg_insert_sql(stg_table: str, target_columns: list[str]) -> str:
     """
 
 
+def build_create_stg_pk_sql(stg_table: str, pk_columns: list[str]) -> str | None:
+    if not pk_columns:
+        return None
+
+    pk_columns_sql = ", ".join(pk_columns)
+    pk_name = f"PK_{stg_table.upper()}"[:30]
+
+    return f"""
+        ALTER TABLE {stg_table}
+        ADD CONSTRAINT {pk_name}
+        PRIMARY KEY ({pk_columns_sql})
+    """
+
+
 def normalize_rows_for_odbc(rows: list[tuple], column_count: int) -> list[tuple]:
     normalized = []
 
@@ -557,6 +571,10 @@ with DAG(
             FROM {target_table}
             WHERE 1 = 0
         """
+        create_stg_pk_sql = build_create_stg_pk_sql(
+            stg_table=stg_table,
+            pk_columns=pk_columns,
+        )
         truncate_target_sql = f"TRUNCATE TABLE {target_table}"
 
         source_hook = OdbcHook(odbc_conn_id=source_conn_name)
@@ -583,7 +601,13 @@ with DAG(
                 print(f"{stg_table} drop skipped (not exists or drop failed before recreate)")
 
             target_hook.run(create_stg_sql)
-            print(f"{stg_table} created without PK/constraints")
+            print(f"{stg_table} created")
+
+            if create_stg_pk_sql:
+                target_hook.run(create_stg_pk_sql)
+                print(f"{stg_table} primary key created: {pk_columns}")
+            else:
+                print(f"{stg_table} primary key creation skipped (no pk_columns)")
 
             source_conn = source_hook.get_conn()
 

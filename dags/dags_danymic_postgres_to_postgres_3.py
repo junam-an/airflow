@@ -8,10 +8,8 @@ from airflow.decorators import task
 from airflow.providers.postgres.hooks.postgres import PostgresHook
 
 
-DAG_ID = "dynamic_postgres_to_postgres_etl_meta_3"
+DAG_ID = "DYNAMIC_POSTGRES_TO_POSTGRES_ETL_META_3"
 
-SOURCE_POSTGRES_CONN_ID = "postgres_conn"
-TARGET_POSTGRES_CONN_ID = "postgres_conn"
 META_POSTGRES_CONN_ID = "postgres_conn"
 
 CHUNK_SIZE = 5000
@@ -138,6 +136,39 @@ def parse_input_params(raw_input_param: str | None) -> dict[str, str]:
     return result
 
 
+def parse_config_option(raw_config_option: str | None) -> dict[str, str]:
+    if raw_config_option is None:
+        return {}
+
+    raw_config_option = raw_config_option.strip()
+    if not raw_config_option:
+        return {}
+
+    try:
+        parsed = json.loads(raw_config_option)
+    except json.JSONDecodeError as e:
+        raise ValueError(
+            f"Invalid config_option JSON: {raw_config_option}"
+        ) from e
+
+    if not isinstance(parsed, dict):
+        raise ValueError(
+            f"config_option must be JSON object(dict): {raw_config_option}"
+        )
+
+    result = {}
+    for k, v in parsed.items():
+        key = str(k).strip()
+        val = "" if v is None else str(v).strip()
+
+        if not key:
+            raise ValueError(f"Invalid config_option key: {k}")
+
+        result[key] = val
+
+    return result
+
+
 def apply_input_params(sql_text: str | None, input_params: dict[str, str]) -> str:
     if sql_text is None:
         return ""
@@ -180,39 +211,39 @@ with DAG(
         meta_hook.run("SET TIME ZONE 'Asia/Seoul'")
 
         insert_etl_param_sql = """
-        insert into etl_param
-        with base_param AS
+        INSERT INTO ETL_PARAM
+        WITH BASE_PARAM AS
         (
-        select
-        yesterday_dt as p_base_dt
-        , yesterday_dt as p_start_dt
-        , yesterday_dt as p_end_dt
-        , bef_max_day as p_bef_max_dt
-        , max_day as p_max_dt
-        from etl_calendar
-        where 1=1
-        and today_dt = TO_CHAR(timezone('Asia/Seoul', CURRENT_DATE)::timestamp, 'YYYYMMDD')
+        SELECT
+        YESTERDAY_DT AS P_BASE_DT
+        , YESTERDAY_DT AS P_START_DT
+        , YESTERDAY_DT AS P_END_DT
+        , BEF_MAX_DAY AS P_BEF_MAX_DT
+        , MAX_DAY AS P_MAX_DT
+        FROM ETL_CALENDAR
+        WHERE 1=1
+        AND TODAY_DT = TO_CHAR(TIMEZONE('ASIA/SEOUL', CURRENT_DATE)::TIMESTAMP, 'YYYYMMDD')
         )
-        select 
-        dag_id
-        , A.source_table
-        , A.target_table
-        , '{"$$p_base_dt":"''' || p_base_dt || 
-        '''","$$p_start_dt":"''' || p_start_dt ||
-        '''","$$p_end_dt":"''' || p_end_dt ||
-        '''","$$p_start_tm":"''' || (input_param::json ->> '$$p_end_tm') ||
-        '''","$$p_end_tm":"''' || to_char(timezone('Asia/Seoul', NOW())::timestamp, 'YYYYMMDDHH24MISS') ||
-        '''","$$p_bef_max_dt":"''' || p_bef_max_dt ||
-        '''","$$p_max_dt":"''' || p_max_dt ||
-        '''"}' as tobe_param
-        , A.input_param as asis_param
-        , timezone('Asia/Seoul', NOW())::timestamp as created_tm
-        , 'airflow' as create_user_id
-        from etl_meta_db_to_db A, base_param B
-        where 1=1
-        and dag_id = %s
-        and disable_dt = '20991231'
-        and enable_yn = 'Y'
+        SELECT 
+        DAG_ID
+        , A.SOURCE_TABLE
+        , A.TARGET_TABLE
+        , '{"$$P_BASE_DT":"' || P_BASE_DT || 
+        '","$$P_START_DT":"' || P_START_DT ||
+        '","$$P_END_DT":"' || P_END_DT ||
+        '","$$P_START_TM":"' || (INPUT_PARAM::JSON ->> '$$P_END_TM') ||
+        '","$$P_END_TM":"' || TO_CHAR(TIMEZONE('ASIA/SEOUL', NOW())::TIMESTAMP, 'YYYYMMDDHH24MISS') ||
+        '","$$P_BEF_MAX_DT":"' || P_BEF_MAX_DT ||
+        '","$$P_MAX_DT":"' || P_MAX_DT ||
+        '"}' AS TOBE_PARAM
+        , A.INPUT_PARAM AS ASIS_PARAM
+        , TIMEZONE('ASIA/SEOUL', NOW())::TIMESTAMP AS CREATED_TM
+        , 'AIRFLOW' AS CREATE_USER_ID
+        FROM ETL_META_DB_TO_DB A, BASE_PARAM B
+        WHERE 1=1
+        AND DAG_ID = %s
+        AND DISABLE_DT = '20991231'
+        AND ENABLE_YN = 'Y'
         """
 
         update_input_param_sql = """
@@ -252,6 +283,7 @@ with DAG(
             stg_drop_yn,
             target_pre_sql,
             target_post_sql,
+            config_option,
             input_param
         FROM etl_meta_db_to_db
         WHERE 1=1
@@ -304,7 +336,8 @@ with DAG(
             stg_drop_yn = (r[6] or "N").strip().upper() if r[6] is not None else "N"
             target_pre_sql = (r[7] or "").strip() if r[7] is not None else ""
             target_post_sql = (r[8] or "").strip() if r[8] is not None else ""
-            input_param = (r[9] or "").strip() if r[9] is not None else ""
+            config_option = (r[9] or "").strip() if r[9] is not None else ""
+            input_param = (r[10] or "").strip() if r[10] is not None else ""
 
             if not target_table:
                 raise ValueError("etl_meta.target_table is empty")
@@ -342,6 +375,7 @@ with DAG(
                     "stg_drop_yn": stg_drop_yn,
                     "target_pre_sql": target_pre_sql,
                     "target_post_sql": target_post_sql,
+                    "config_option": config_option,
                     "input_param": input_param,
                 }
             )
@@ -359,6 +393,7 @@ with DAG(
         stg_drop_yn = (table_config.get("stg_drop_yn") or "N").strip().upper()
         raw_target_pre_sql = (table_config.get("target_pre_sql") or "").strip()
         raw_target_post_sql = (table_config.get("target_post_sql") or "").strip()
+        raw_config_option = table_config.get("config_option")
         raw_input_param = table_config.get("input_param")
 
         if not target_table:
@@ -382,6 +417,21 @@ with DAG(
                 f"{target_table}: pk_columns is required for load_option [{load_option}]"
             )
 
+        config_option = parse_config_option(raw_config_option)
+
+        source_conn_name = (config_option.get("SOURCE_CONN_NAME") or "").strip()
+        target_conn_name = (config_option.get("TARGET_CONN_NAME") or "").strip()
+
+        if not source_conn_name:
+            raise ValueError(
+                f"{target_table}: config_option.SOURCE_CONN_NAME is empty"
+            )
+
+        if not target_conn_name:
+            raise ValueError(
+                f"{target_table}: config_option.TARGET_CONN_NAME is empty"
+            )
+
         input_params = parse_input_params(raw_input_param)
 
         source_exec_sql = apply_input_params(raw_source_exec_sql, input_params)
@@ -402,8 +452,8 @@ with DAG(
         truncate_target_sql = f"TRUNCATE TABLE {target_table}"
         drop_stg_sql = f"DROP TABLE IF EXISTS {stg_table}"
 
-        source_hook = PostgresHook(postgres_conn_id=SOURCE_POSTGRES_CONN_ID)
-        target_hook = PostgresHook(postgres_conn_id=TARGET_POSTGRES_CONN_ID)
+        source_hook = PostgresHook(postgres_conn_id=source_conn_name)
+        target_hook = PostgresHook(postgres_conn_id=target_conn_name)
 
         source_conn = None
         meta_cursor = None

@@ -11,9 +11,8 @@ from airflow.decorators import task
 from airflow.providers.postgres.hooks.postgres import PostgresHook
 
 
-DAG_ID = "dynamic_file_to_postgres_etl_meta_2"
+DAG_ID = "DYNAMIC_FILE_TO_POSTGRES_ETL_META_2"
 
-TARGET_POSTGRES_CONN_ID = "postgres_conn"
 META_POSTGRES_CONN_ID = "postgres_conn"
 
 
@@ -128,6 +127,39 @@ def parse_input_params(raw_input_param: str | None) -> dict[str, str]:
 
         if not key:
             raise ValueError(f"Invalid input_param key: {k}")
+
+        result[key] = val
+
+    return result
+
+
+def parse_config_option(raw_config_option: str | None) -> dict[str, str]:
+    if raw_config_option is None:
+        return {}
+
+    raw_config_option = raw_config_option.strip()
+    if not raw_config_option:
+        return {}
+
+    try:
+        parsed = json.loads(raw_config_option)
+    except json.JSONDecodeError as e:
+        raise ValueError(
+            f"Invalid config_option JSON: {raw_config_option}"
+        ) from e
+
+    if not isinstance(parsed, dict):
+        raise ValueError(
+            f"config_option must be JSON object(dict): {raw_config_option}"
+        )
+
+    result = {}
+    for k, v in parsed.items():
+        key = str(k).strip().upper()
+        val = "" if v is None else str(v).strip()
+
+        if not key:
+            raise ValueError(f"Invalid config_option key: {k}")
 
         result[key] = val
 
@@ -361,6 +393,7 @@ with DAG(
             source_pre_cmd,
             target_pre_sql,
             target_post_sql,
+            config_option,
             input_param
         FROM etl_meta_file_to_db
         WHERE 1=1
@@ -378,6 +411,7 @@ with DAG(
             cursor = conn.cursor()
 
             cursor.execute("SET TIME ZONE 'Asia/Seoul'")
+
             cursor.execute(update_input_param_sql, (DAG_ID,))
             cursor.execute(select_meta_sql, (DAG_ID,))
             rows = cursor.fetchall()
@@ -411,9 +445,17 @@ with DAG(
             source_pre_cmd = (r[10] or "").strip() if r[10] is not None else ""
             target_pre_sql = (r[11] or "").strip() if r[11] is not None else ""
             target_post_sql = (r[12] or "").strip() if r[12] is not None else ""
-            input_param = (r[13] or "").strip() if r[13] is not None else ""
+            config_option = (r[13] or "").strip() if r[13] is not None else ""
+            input_param = (r[14] or "").strip() if r[14] is not None else ""
 
             normalized_source_file_encoding = normalize_file_encoding(source_file_encoding)
+            parsed_config_option = parse_config_option(config_option)
+
+            target_driver_type = parsed_config_option.get("TARGET_DRIVER_TYPE", "").strip().upper()
+            target_conn_name = parsed_config_option.get("TARGET_CONN_NAME", "").strip()
+            target_db_type = parsed_config_option.get("TARGET_DB_TYPE", "").strip().upper()
+            target_db_host = parsed_config_option.get("TARGET_DB_HOST", "").strip()
+            target_db_port = parsed_config_option.get("TARGET_DB_PORT", "").strip()
 
             if not source_table:
                 raise ValueError("etl_meta_file_to_db.source_table(file_name/pattern) is empty")
@@ -454,9 +496,26 @@ with DAG(
                     f"{target_table}: pk_column is required for load_option [{load_option}]"
                 )
 
+            if target_driver_type != "POSTGRESHOOK":
+                raise ValueError(
+                    f"{target_table}: config_option.TARGET_DRIVER_TYPE must be 'POSTGRESHOOK'. "
+                    f"current=[{parsed_config_option.get('TARGET_DRIVER_TYPE', '')}]"
+                )
+
+            if target_db_type != "POSTGRES":
+                raise ValueError(
+                    f"{target_table}: config_option.TARGET_DB_TYPE must be 'POSTGRES'. "
+                    f"current=[{parsed_config_option.get('TARGET_DB_TYPE', '')}]"
+                )
+
+            if not target_conn_name:
+                raise ValueError(
+                    f"{target_table}: config_option.TARGET_CONN_NAME is empty"
+                )
+
             configs.append(
                 {
-                    "source_table": source_table,  # 파일명 또는 패턴
+                    "source_table": source_table,
                     "target_table": target_table,
                     "pk_columns": pk_columns,
                     "column_mapping": column_mapping,
@@ -469,7 +528,13 @@ with DAG(
                     "source_pre_cmd": source_pre_cmd,
                     "target_pre_sql": target_pre_sql,
                     "target_post_sql": target_post_sql,
+                    "config_option": parsed_config_option,
                     "input_param": input_param,
+                    "target_conn_name": target_conn_name,
+                    "target_driver_type": target_driver_type,
+                    "target_db_type": target_db_type,
+                    "target_db_host": target_db_host,
+                    "target_db_port": target_db_port,
                 }
             )
 
@@ -477,7 +542,7 @@ with DAG(
 
     @task(pool_slots=1)
     def run_etl(table_config: dict):
-        source_table = (table_config.get("source_table") or "").strip()  # 파일명 또는 패턴
+        source_table = (table_config.get("source_table") or "").strip()
         target_table = (table_config.get("target_table") or "").strip()
         pk_columns = table_config.get("pk_columns") or []
         raw_column_mapping = table_config.get("column_mapping")
@@ -492,6 +557,12 @@ with DAG(
         raw_target_pre_sql = (table_config.get("target_pre_sql") or "").strip()
         raw_target_post_sql = (table_config.get("target_post_sql") or "").strip()
         raw_input_param = table_config.get("input_param")
+
+        target_conn_name = (table_config.get("target_conn_name") or "").strip()
+        target_driver_type = (table_config.get("target_driver_type") or "").strip().upper()
+        target_db_type = (table_config.get("target_db_type") or "").strip().upper()
+        target_db_host = (table_config.get("target_db_host") or "").strip()
+        target_db_port = (table_config.get("target_db_port") or "").strip()
 
         if not source_table:
             raise ValueError("table_config.source_table(file_name/pattern) is empty")
@@ -522,6 +593,21 @@ with DAG(
                 f"{target_table}: pk_columns is required for load_option [{load_option}]"
             )
 
+        if target_driver_type != "POSTGRESHOOK":
+            raise ValueError(
+                f"{target_table}: target_driver_type must be 'POSTGRESHOOK'. current=[{target_driver_type}]"
+            )
+
+        if target_db_type != "POSTGRES":
+            raise ValueError(
+                f"{target_table}: target_db_type must be 'POSTGRES'. current=[{target_db_type}]"
+            )
+
+        if not target_conn_name:
+            raise ValueError(
+                f"{target_table}: target_conn_name is empty"
+            )
+
         input_params = parse_input_params(raw_input_param)
 
         source_file_type = apply_input_params(raw_source_file_type, input_params).lower()
@@ -543,9 +629,13 @@ with DAG(
             )
 
         source_dir_path = Path(source_file_dir)
-
         matched_files = sorted(source_dir_path.glob(source_file_pattern))
 
+        print(f"[DEBUG] target_conn_name={target_conn_name}")
+        print(f"[DEBUG] target_driver_type={target_driver_type}")
+        print(f"[DEBUG] target_db_type={target_db_type}")
+        print(f"[DEBUG] target_db_host={target_db_host}")
+        print(f"[DEBUG] target_db_port={target_db_port}")
         print(f"[DEBUG] source_file_dir={source_file_dir}")
         print(f"[DEBUG] source_file_pattern={source_file_pattern}")
         print(f"[DEBUG] matched_files={[str(p) for p in matched_files]}")
@@ -573,7 +663,7 @@ with DAG(
         truncate_target_sql = f"TRUNCATE TABLE {target_table}"
         drop_stg_sql = f"DROP TABLE IF EXISTS {stg_table}"
 
-        target_hook = PostgresHook(postgres_conn_id=TARGET_POSTGRES_CONN_ID)
+        target_hook = PostgresHook(postgres_conn_id=target_conn_name)
 
         target_tx_conn = None
         target_tx_cursor = None
