@@ -3,6 +3,7 @@ from __future__ import annotations
 import csv
 import json
 import subprocess
+import traceback
 from datetime import datetime
 from pathlib import Path
 
@@ -10,6 +11,13 @@ from airflow import DAG
 from airflow.decorators import task
 from airflow.providers.odbc.hooks.odbc import OdbcHook
 from airflow.providers.postgres.hooks.postgres import PostgresHook
+
+from common.etl_hist_utils import (
+    get_task_runtime_info,
+    insert_etl_run_hist,
+    update_etl_run_hist_success,
+    update_etl_run_hist_failed,
+)
 
 
 DAG_ID = "DYNAMIC_ODBC_ORACLE_TO_FILE_ETL_META_3"
@@ -524,7 +532,9 @@ with DAG(
         return configs
 
     @task(pool_slots=1)
-    def run_etl(table_config: dict):
+    def run_etl(table_config: dict, **context):
+        runtime_info = get_task_runtime_info(**context)
+
         source_table = (table_config.get("source_table") or "").strip()
         raw_target_file_name = (table_config.get("target_table") or "").strip()
         raw_source_exec_sql = (table_config.get("source_exec_sql") or "").strip()
@@ -536,7 +546,13 @@ with DAG(
         raw_target_pre_cmd = (table_config.get("target_pre_cmd") or "").strip()
         raw_target_post_cmd = (table_config.get("target_post_cmd") or "").strip()
         raw_input_param = table_config.get("input_param")
+        config_option = table_config.get("config_option") or {}
         source_conn_name = (table_config.get("source_conn_name") or "").strip()
+
+        run_hist_id = None
+        extract_row_count = 0
+        file_write_row_count = 0
+        target_file_path = ""
 
         if not raw_target_file_name:
             raise ValueError("table_config.target_table(file_name) is empty")
@@ -557,177 +573,214 @@ with DAG(
                 f"{raw_target_file_name}: source_conn_name is empty"
             )
 
-        input_params = parse_input_params(raw_input_param)
-
-        source_exec_sql = apply_input_params(raw_source_exec_sql, input_params)
-
-        target_file_type = apply_input_params_for_file(raw_target_file_type, input_params).lower()
-        csv_file_delimiter = apply_input_params_for_file(raw_csv_file_delimiter, input_params)
-        normalized_csv_file_delimiter = normalize_csv_delimiter(csv_file_delimiter)
-
-        target_file_encoding = apply_input_params_for_file(raw_target_file_encoding, input_params)
-        normalized_target_file_encoding = normalize_file_encoding(target_file_encoding)
-
-        target_file_dir = apply_input_params_for_file(raw_target_file_dir, input_params)
-        target_pre_cmd = apply_input_params_for_file(raw_target_pre_cmd, input_params)
-        target_post_cmd = apply_input_params_for_file(raw_target_post_cmd, input_params)
-        target_file_name = apply_input_params_for_file(raw_target_file_name, input_params)
-
-        if not source_exec_sql:
-            raise ValueError(
-                f"{target_file_name}: source_exec_sql is empty after param replacement"
-            )
-
-        if target_file_type == "csv" and not normalized_csv_file_delimiter:
-            raise ValueError(
-                f"{target_file_name}: csv_file_delimiter is empty after param replacement"
-            )
-
-        full_target_file_path = str(Path(target_file_dir) / target_file_name)
-
-        print(f"[DEBUG] source_table={source_table}")
-        print(f"[DEBUG] source_conn_name={source_conn_name}")
-        print(f"[DEBUG] target_file_name={target_file_name}")
-        print(f"[DEBUG] target_file_dir={target_file_dir}")
-        print(f"[DEBUG] full_target_file_path={full_target_file_path}")
-        print(f"[DEBUG] target_file_type={target_file_type}")
-        print(f"[DEBUG] csv_file_delimiter_raw={csv_file_delimiter}")
-        print(f"[DEBUG] csv_file_delimiter_normalized={repr(normalized_csv_file_delimiter)}")
-        print(f"[DEBUG] target_file_encoding_raw={target_file_encoding}")
-        print(f"[DEBUG] target_file_encoding_normalized={normalized_target_file_encoding}")
-
-        source_hook = OdbcHook(odbc_conn_id=source_conn_name)
-
-        source_conn = None
-        meta_cursor = None
-        source_cursor = None
-
-        job_succeeded = False
-
         try:
-            if target_pre_cmd:
-                completed = subprocess.run(
-                    target_pre_cmd,
-                    shell=True,
-                    check=True,
-                    capture_output=True,
-                    text=True,
-                )
-                if completed.stdout:
-                    print(completed.stdout)
-                if completed.stderr:
-                    print(completed.stderr)
-
-            source_conn = source_hook.get_conn()
-
-            meta_cursor = source_conn.cursor()
-            meta_sql = build_limit_0_sql_for_oracle(source_exec_sql)
-            meta_cursor.execute(meta_sql)
-
-            if meta_cursor.description is None:
-                raise ValueError(
-                    f"{target_file_name}: source_exec_sql did not return a result set. "
-                    f"Only SELECT query is allowed. source_exec_sql=[{source_exec_sql}]"
-                )
-
-            source_columns = [desc[0] for desc in meta_cursor.description]
-
-            if not source_columns:
-                raise ValueError(
-                    f"{target_file_name}: source_exec_sql returned no columns. "
-                    f"source_exec_sql=[{source_exec_sql}]"
-                )
-
-            column_mapping = parse_column_mapping(raw_column_mapping) or {}
-
-            target_columns = [
-                column_mapping.get(src_col, src_col)
-                for src_col in source_columns
-            ]
-
-            if not target_columns:
-                raise ValueError(
-                    f"{target_file_name}: mapped target_columns is empty"
-                )
-
-            if len(set(target_columns)) != len(target_columns):
-                raise ValueError(
-                    f"{target_file_name}: duplicate target columns detected after mapping. "
-                    f"source_columns={source_columns}, target_columns={target_columns}"
-                )
-
-            if target_file_type == "text" and len(target_columns) != 1:
-                raise ValueError(
-                    f"{target_file_name}: text target requires exactly one column. "
-                    f"target_columns={target_columns}"
-                )
-
-            source_cursor = source_conn.cursor()
-            source_cursor.execute(source_exec_sql)
-            rows = source_cursor.fetchall()
-
-            print(f"[DEBUG] source_columns={source_columns}")
-            print(f"[DEBUG] target_columns={target_columns}")
-            print(f"[DEBUG] total_fetched_rows={len(rows)}")
-            print(f"[DEBUG] sample_rows={rows[:5]}")
-
-            if target_file_type == "csv":
-                write_csv_file(
-                    file_path=full_target_file_path,
-                    columns=target_columns,
-                    rows=rows,
-                    delimiter=normalized_csv_file_delimiter,
-                    encoding=normalized_target_file_encoding,
-                )
-
-            elif target_file_type == "json":
-                write_json_file(
-                    file_path=full_target_file_path,
-                    columns=target_columns,
-                    rows=rows,
-                    encoding=normalized_target_file_encoding,
-                )
-
-            elif target_file_type == "text":
-                write_text_file(
-                    file_path=full_target_file_path,
-                    columns=target_columns,
-                    rows=rows,
-                    encoding=normalized_target_file_encoding,
-                )
-
-            print(
-                f"{source_table or '[source_sql]'} -> {full_target_file_path} "
-                f"rows={len(rows)} file_type={target_file_type} "
-                f"encoding={normalized_target_file_encoding}"
+            run_hist_id = insert_etl_run_hist(
+                dag_id=DAG_ID,
+                run_id=runtime_info["run_id"],
+                task_id=runtime_info["task_id"],
+                map_index=runtime_info["map_index"],
+                source_table=source_table,
+                target_table=raw_target_file_name,
+                load_option="FILE",
+                source_conn_name=source_conn_name,
+                target_conn_name="",
+                input_param=raw_input_param,
+                config_option=config_option,
             )
 
-            if target_post_cmd:
-                completed = subprocess.run(
-                    target_post_cmd,
-                    shell=True,
-                    check=True,
-                    capture_output=True,
-                    text=True,
+            input_params = parse_input_params(raw_input_param)
+
+            source_exec_sql = apply_input_params(raw_source_exec_sql, input_params)
+
+            target_file_type = apply_input_params_for_file(raw_target_file_type, input_params).lower()
+            csv_file_delimiter = apply_input_params_for_file(raw_csv_file_delimiter, input_params)
+            normalized_csv_file_delimiter = normalize_csv_delimiter(csv_file_delimiter)
+
+            target_file_encoding = apply_input_params_for_file(raw_target_file_encoding, input_params)
+            normalized_target_file_encoding = normalize_file_encoding(target_file_encoding)
+
+            target_file_dir = apply_input_params_for_file(raw_target_file_dir, input_params)
+            target_pre_cmd = apply_input_params_for_file(raw_target_pre_cmd, input_params)
+            target_post_cmd = apply_input_params_for_file(raw_target_post_cmd, input_params)
+            target_file_name = apply_input_params_for_file(raw_target_file_name, input_params)
+
+            if not source_exec_sql:
+                raise ValueError(
+                    f"{target_file_name}: source_exec_sql is empty after param replacement"
                 )
-                if completed.stdout:
-                    print(completed.stdout)
-                if completed.stderr:
-                    print(completed.stderr)
 
-            job_succeeded = True
+            if target_file_type == "csv" and not normalized_csv_file_delimiter:
+                raise ValueError(
+                    f"{target_file_name}: csv_file_delimiter is empty after param replacement"
+                )
 
-        finally:
-            if meta_cursor is not None:
-                meta_cursor.close()
+            full_target_file_path = str(Path(target_file_dir) / target_file_name)
+            target_file_path = full_target_file_path
 
-            if source_cursor is not None:
-                source_cursor.close()
+            print(f"[DEBUG] source_table={source_table}")
+            print(f"[DEBUG] source_conn_name={source_conn_name}")
+            print(f"[DEBUG] target_file_name={target_file_name}")
+            print(f"[DEBUG] target_file_dir={target_file_dir}")
+            print(f"[DEBUG] full_target_file_path={full_target_file_path}")
+            print(f"[DEBUG] target_file_type={target_file_type}")
+            print(f"[DEBUG] csv_file_delimiter_raw={csv_file_delimiter}")
+            print(f"[DEBUG] csv_file_delimiter_normalized={repr(normalized_csv_file_delimiter)}")
+            print(f"[DEBUG] target_file_encoding_raw={target_file_encoding}")
+            print(f"[DEBUG] target_file_encoding_normalized={normalized_target_file_encoding}")
 
-            if source_conn is not None:
-                source_conn.close()
+            source_hook = OdbcHook(odbc_conn_id=source_conn_name)
 
-            print(f"[DEBUG] job_succeeded={job_succeeded}")
+            source_conn = None
+            meta_cursor = None
+            source_cursor = None
+
+            job_succeeded = False
+
+            try:
+                if target_pre_cmd:
+                    completed = subprocess.run(
+                        target_pre_cmd,
+                        shell=True,
+                        check=True,
+                        capture_output=True,
+                        text=True,
+                    )
+                    if completed.stdout:
+                        print(completed.stdout)
+                    if completed.stderr:
+                        print(completed.stderr)
+
+                source_conn = source_hook.get_conn()
+
+                meta_cursor = source_conn.cursor()
+                meta_sql = build_limit_0_sql_for_oracle(source_exec_sql)
+                meta_cursor.execute(meta_sql)
+
+                if meta_cursor.description is None:
+                    raise ValueError(
+                        f"{target_file_name}: source_exec_sql did not return a result set. "
+                        f"Only SELECT query is allowed. source_exec_sql=[{source_exec_sql}]"
+                    )
+
+                source_columns = [desc[0] for desc in meta_cursor.description]
+
+                if not source_columns:
+                    raise ValueError(
+                        f"{target_file_name}: source_exec_sql returned no columns. "
+                        f"source_exec_sql=[{source_exec_sql}]"
+                    )
+
+                column_mapping = parse_column_mapping(raw_column_mapping) or {}
+
+                target_columns = [
+                    column_mapping.get(src_col, src_col)
+                    for src_col in source_columns
+                ]
+
+                if not target_columns:
+                    raise ValueError(
+                        f"{target_file_name}: mapped target_columns is empty"
+                    )
+
+                if len(set(target_columns)) != len(target_columns):
+                    raise ValueError(
+                        f"{target_file_name}: duplicate target columns detected after mapping. "
+                        f"source_columns={source_columns}, target_columns={target_columns}"
+                    )
+
+                if target_file_type == "text" and len(target_columns) != 1:
+                    raise ValueError(
+                        f"{target_file_name}: text target requires exactly one column. "
+                        f"target_columns={target_columns}"
+                    )
+
+                source_cursor = source_conn.cursor()
+                source_cursor.execute(source_exec_sql)
+                rows = source_cursor.fetchall()
+
+                extract_row_count = len(rows)
+                file_write_row_count = len(rows)
+
+                print(f"[DEBUG] source_columns={source_columns}")
+                print(f"[DEBUG] target_columns={target_columns}")
+                print(f"[DEBUG] total_fetched_rows={len(rows)}")
+                print(f"[DEBUG] sample_rows={rows[:5]}")
+
+                if target_file_type == "csv":
+                    write_csv_file(
+                        file_path=full_target_file_path,
+                        columns=target_columns,
+                        rows=rows,
+                        delimiter=normalized_csv_file_delimiter,
+                        encoding=normalized_target_file_encoding,
+                    )
+
+                elif target_file_type == "json":
+                    write_json_file(
+                        file_path=full_target_file_path,
+                        columns=target_columns,
+                        rows=rows,
+                        encoding=normalized_target_file_encoding,
+                    )
+
+                elif target_file_type == "text":
+                    write_text_file(
+                        file_path=full_target_file_path,
+                        columns=target_columns,
+                        rows=rows,
+                        encoding=normalized_target_file_encoding,
+                    )
+
+                print(
+                    f"{source_table or '[source_sql]'} -> {full_target_file_path} "
+                    f"rows={len(rows)} file_type={target_file_type} "
+                    f"encoding={normalized_target_file_encoding}"
+                )
+
+                if target_post_cmd:
+                    completed = subprocess.run(
+                        target_post_cmd,
+                        shell=True,
+                        check=True,
+                        capture_output=True,
+                        text=True,
+                    )
+                    if completed.stdout:
+                        print(completed.stdout)
+                    if completed.stderr:
+                        print(completed.stderr)
+
+                job_succeeded = True
+
+            finally:
+                if meta_cursor is not None:
+                    meta_cursor.close()
+
+                if source_cursor is not None:
+                    source_cursor.close()
+
+                if source_conn is not None:
+                    source_conn.close()
+
+                print(f"[DEBUG] job_succeeded={job_succeeded}")
+
+            update_etl_run_hist_success(
+                run_hist_id=run_hist_id,
+                extract_row_count=extract_row_count,
+                file_write_row_count=file_write_row_count,
+                target_file_path=target_file_path,
+            )
+
+        except Exception:
+            if run_hist_id is not None:
+                update_etl_run_hist_failed(
+                    run_hist_id=run_hist_id,
+                    error_message=traceback.format_exc(),
+                    extract_row_count=extract_row_count,
+                    file_write_row_count=file_write_row_count,
+                    target_file_path=target_file_path,
+                )
+            raise
 
     table_configs = get_table_configs()
     run_etl.expand(table_config=table_configs)

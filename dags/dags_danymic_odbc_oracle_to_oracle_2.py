@@ -1,12 +1,20 @@
 from __future__ import annotations
 
 import json
+import traceback
 from datetime import datetime
 
 from airflow import DAG
 from airflow.decorators import task
 from airflow.providers.odbc.hooks.odbc import OdbcHook
 from airflow.providers.postgres.hooks.postgres import PostgresHook
+
+from common.etl_hist_utils import (
+    get_task_runtime_info,
+    insert_etl_run_hist,
+    update_etl_run_hist_success,
+    update_etl_run_hist_failed,
+)
 
 
 DAG_ID = "DYNAMIC_ORACLE_TO_ORACLE_ETL_META_2"
@@ -222,29 +230,6 @@ def build_insert_sql(target_table: str, stg_table: str, target_columns: list[str
     """
 
 
-def build_insert_not_exists_sql(
-    target_table: str,
-    stg_table: str,
-    target_columns: list[str],
-    pk_columns: list[str],
-) -> str:
-    insert_columns_sql = ", ".join(target_columns)
-    select_columns_sql = ", ".join([f"s.{col}" for col in target_columns])
-    not_exists_condition_sql = " AND ".join(
-        [f"t.{pk} = s.{pk}" for pk in pk_columns]
-    )
-
-    return f"""
-        INSERT INTO {target_table} ({insert_columns_sql})
-        SELECT {select_columns_sql}
-        FROM {stg_table} s
-        WHERE NOT EXISTS (
-            SELECT 1
-            FROM {target_table} t
-            WHERE {not_exists_condition_sql}
-        )
-    """
-
 
 def build_delete_sql(target_table: str, stg_table: str, pk_columns: list[str]) -> str:
     pk_join_condition_sql = " AND ".join(
@@ -363,7 +348,6 @@ with DAG(
         meta_hook = PostgresHook(postgres_conn_id=META_POSTGRES_CONN_ID)
 
         meta_hook.run("SET TIME ZONE 'Asia/Seoul'")
-
 
         update_input_param_sql = """
         UPDATE etl_meta_db_to_db a
@@ -509,7 +493,9 @@ with DAG(
         return configs
 
     @task(pool_slots=1)
-    def run_etl(table_config: dict):
+    def run_etl(table_config: dict, **context):
+        runtime_info = get_task_runtime_info(**context)
+
         source_table = (table_config.get("source_table") or "").strip()
         target_table = (table_config.get("target_table") or "").strip()
         pk_columns = table_config.get("pk_columns") or []
@@ -521,6 +507,15 @@ with DAG(
         raw_target_post_sql = (table_config.get("target_post_sql") or "").strip()
         raw_input_param = table_config.get("input_param")
         config_option = table_config.get("config_option") or {}
+
+        run_hist_id = None
+        extract_row_count = 0
+        stg_load_row_count = 0
+        target_insert_count = 0
+        target_update_count = 0
+        target_delete_count = 0
+        file_write_row_count = 0
+        target_file_path = ""
 
         if not target_table:
             raise ValueError("table_config.target_table is empty")
@@ -552,284 +547,328 @@ with DAG(
         if not target_conn_name:
             raise ValueError(f"{target_table}: TARGET_CONN_NAME is empty")
 
-        input_params = parse_input_params(raw_input_param)
-
-        source_exec_sql = apply_input_params(raw_source_exec_sql, input_params)
-        target_pre_sql = apply_input_params(raw_target_pre_sql, input_params)
-        target_post_sql = apply_input_params(raw_target_post_sql, input_params)
-
-        if not source_exec_sql:
-            raise ValueError(
-                f"{target_table}: source_exec_sql is empty after param replacement"
-            )
-
-        stg_table = f"STG_{target_table}"
-
-        drop_stg_sql = f"DROP TABLE {stg_table}"
-        create_stg_sql = f"""
-            CREATE TABLE {stg_table}
-            AS
-            SELECT *
-            FROM {target_table}
-            WHERE 1 = 0
-        """
-        create_stg_pk_sql = build_create_stg_pk_sql(
-            stg_table=stg_table,
-            pk_columns=pk_columns,
-        )
-        truncate_target_sql = f"TRUNCATE TABLE {target_table}"
-
-        source_hook = OdbcHook(odbc_conn_id=source_conn_name)
-        target_hook = OdbcHook(odbc_conn_id=target_conn_name)
-
-        source_conn = None
-        meta_cursor = None
-        source_cursor = None
-
-        target_stg_conn = None
-        target_stg_cursor = None
-
-        target_tx_conn = None
-        target_tx_cursor = None
-
-        total_rows = 0
-        job_succeeded = False
-
         try:
-            try:
-                target_hook.run(drop_stg_sql)
-                print(f"{stg_table} dropped before recreate")
-            except Exception:
-                print(f"{stg_table} drop skipped (not exists or drop failed before recreate)")
-
-            target_hook.run(create_stg_sql)
-            print(f"{stg_table} created")
-
-            if create_stg_pk_sql:
-                target_hook.run(create_stg_pk_sql)
-                print(f"{stg_table} primary key created: {pk_columns}")
-            else:
-                print(f"{stg_table} primary key creation skipped (no pk_columns)")
-
-            source_conn = source_hook.get_conn()
-
-            meta_cursor = source_conn.cursor()
-            meta_sql = build_limit_0_sql(source_exec_sql)
-            meta_cursor.execute(meta_sql)
-
-            if meta_cursor.description is None:
-                raise ValueError(
-                    f"{target_table}: source_exec_sql did not return a result set. "
-                    f"Only SELECT query is allowed. source_exec_sql=[{source_exec_sql}]"
-                )
-
-            source_columns = [desc[0] for desc in meta_cursor.description]
-
-            if not source_columns:
-                raise ValueError(
-                    f"{target_table}: source_exec_sql returned no columns. "
-                    f"source_exec_sql=[{source_exec_sql}]"
-                )
-
-            column_mapping = parse_column_mapping(raw_column_mapping) or {}
-
-            target_columns = [
-                column_mapping.get(src_col, src_col)
-                for src_col in source_columns
-            ]
-
-            if not target_columns:
-                raise ValueError(
-                    f"{target_table}: mapped target_columns is empty"
-                )
-
-            if len(set(target_columns)) != len(target_columns):
-                raise ValueError(
-                    f"{target_table}: duplicate target columns detected after mapping. "
-                    f"source_columns={source_columns}, target_columns={target_columns}"
-                )
-
-            missing_pk_columns = [pk for pk in pk_columns if pk not in target_columns]
-            if missing_pk_columns:
-                raise ValueError(
-                    f"{target_table}: mapped result does not include PK columns: "
-                    f"{missing_pk_columns}. "
-                    f"source_columns={source_columns}, "
-                    f"target_columns={target_columns}"
-                )
-
-            insert_sql = build_insert_sql(target_table, stg_table, target_columns)
-            insert_not_exists_sql = build_insert_not_exists_sql(
+            run_hist_id = insert_etl_run_hist(
+                dag_id=DAG_ID,
+                run_id=runtime_info["run_id"],
+                task_id=runtime_info["task_id"],
+                map_index=runtime_info["map_index"],
+                source_table=source_table,
                 target_table=target_table,
-                stg_table=stg_table,
-                target_columns=target_columns,
-                pk_columns=pk_columns,
+                load_option=load_option,
+                source_conn_name=source_conn_name,
+                target_conn_name=target_conn_name,
+                input_param=raw_input_param,
+                config_option=config_option,
             )
-            delete_sql = build_delete_sql(
-                target_table=target_table,
+
+            input_params = parse_input_params(raw_input_param)
+
+            source_exec_sql = apply_input_params(raw_source_exec_sql, input_params)
+            target_pre_sql = apply_input_params(raw_target_pre_sql, input_params)
+            target_post_sql = apply_input_params(raw_target_post_sql, input_params)
+
+            if not source_exec_sql:
+                raise ValueError(
+                    f"{target_table}: source_exec_sql is empty after param replacement"
+                )
+
+            stg_table = f"STG_{target_table}"
+
+            drop_stg_sql = f"DROP TABLE {stg_table}"
+            create_stg_sql = f"""
+                CREATE TABLE {stg_table}
+                AS
+                SELECT *
+                FROM {target_table}
+                WHERE 1 = 0
+            """
+            create_stg_pk_sql = build_create_stg_pk_sql(
                 stg_table=stg_table,
                 pk_columns=pk_columns,
             )
-            merge_ui_sql = build_merge_ui_sql(
-                target_table=target_table,
-                stg_table=stg_table,
-                target_columns=target_columns,
-                pk_columns=pk_columns,
-            )
-            merge_update_sql = build_merge_update_sql(
-                target_table=target_table,
-                stg_table=stg_table,
-                target_columns=target_columns,
-                pk_columns=pk_columns,
-            )
+            truncate_target_sql = f"TRUNCATE TABLE {target_table}"
 
-            stg_insert_sql = build_stg_insert_sql(stg_table, target_columns)
+            source_hook = OdbcHook(odbc_conn_id=source_conn_name)
+            target_hook = OdbcHook(odbc_conn_id=target_conn_name)
 
-            target_stg_conn = target_hook.get_conn()
-            target_stg_conn.autocommit = False
-            target_stg_cursor = target_stg_conn.cursor()
+            source_conn = None
+            meta_cursor = None
+            source_cursor = None
 
-            try:
-                target_stg_cursor.fast_executemany = True
-            except Exception:
-                pass
-
-            source_cursor = source_conn.cursor()
-            source_cursor.arraysize = CHUNK_SIZE
-            source_cursor.execute(source_exec_sql)
-
-            while True:
-                rows = source_cursor.fetchmany(CHUNK_SIZE)
-
-                if not rows:
-                    break
-
-                normalized_rows = normalize_rows_for_odbc(
-                    rows=rows,
-                    column_count=len(target_columns),
-                )
-
-                if not normalized_rows:
-                    continue
-
-                target_stg_cursor.executemany(stg_insert_sql, normalized_rows)
-                target_stg_conn.commit()
-
-                total_rows += len(normalized_rows)
-
-                print(
-                    f"{source_table or '[source_sql]'} -> {stg_table} "
-                    f"chunk={len(normalized_rows)} total={total_rows} "
-                    f"source_columns={source_columns} "
-                    f"target_columns={target_columns}"
-                )
-
-            target_stg_cursor.close()
-            target_stg_cursor = None
-            target_stg_conn.close()
             target_stg_conn = None
+            target_stg_cursor = None
 
-            if total_rows > 0:
-                target_tx_conn = target_hook.get_conn()
-                target_tx_conn.autocommit = False
-                target_tx_cursor = target_tx_conn.cursor()
+            target_tx_conn = None
+            target_tx_cursor = None
 
-                try:
-                    if target_pre_sql:
-                        target_tx_cursor.execute(target_pre_sql)
-                        print(f"{target_table} target_pre_sql completed")
+            job_succeeded = False
 
-                    if load_option == "ui":
-                        target_tx_cursor.execute(merge_ui_sql)
-                        print(
-                            f"{stg_table} -> {target_table} MERGE completed (UI), total={total_rows}"
-                        )
-
-                    elif load_option == "di":
-                        target_tx_cursor.execute(delete_sql)
-                        print(f"{target_table} DELETE completed")
-
-                        target_tx_cursor.execute(insert_sql)
-                        print(
-                            f"{stg_table} -> {target_table} INSERT completed (DI), total={total_rows}"
-                        )
-
-                    elif load_option == "ti":
-                        target_tx_cursor.execute(truncate_target_sql)
-                        print(f"{target_table} TRUNCATE completed")
-
-                        target_tx_cursor.execute(insert_sql)
-                        print(
-                            f"{stg_table} -> {target_table} INSERT completed (TI), total={total_rows}"
-                        )
-
-                    elif load_option == "i":
-                        target_tx_cursor.execute(insert_sql)
-                        print(
-                            f"{stg_table} -> {target_table} INSERT completed (I), total={total_rows}"
-                        )
-
-                    elif load_option == "u":
-                        if not merge_update_sql:
-                            print(
-                                f"{target_table}: no non-pk columns to update, UPDATE skipped (U)"
-                            )
-                        else:
-                            target_tx_cursor.execute(merge_update_sql)
-                            print(f"{target_table} MERGE UPDATE completed (U)")
-
-                    elif load_option == "d":
-                        target_tx_cursor.execute(delete_sql)
-                        print(f"{target_table} DELETE completed (D)")
-
-                    if target_post_sql:
-                        target_tx_cursor.execute(target_post_sql)
-                        print(f"{target_table} target_post_sql completed")
-
-                    target_tx_conn.commit()
-                    job_succeeded = True
-
-                except Exception:
-                    target_tx_conn.rollback()
-                    raise
-
-            else:
-                print(f"{target_table}: no rows fetched, target load skipped")
-                job_succeeded = True
-
-        finally:
-            if meta_cursor is not None:
-                meta_cursor.close()
-
-            if source_cursor is not None:
-                source_cursor.close()
-
-            if source_conn is not None:
-                source_conn.close()
-
-            if target_stg_cursor is not None:
-                target_stg_cursor.close()
-
-            if target_stg_conn is not None:
-                target_stg_conn.close()
-
-            if target_tx_cursor is not None:
-                target_tx_cursor.close()
-
-            if target_tx_conn is not None:
-                target_tx_conn.close()
-
-            if job_succeeded and stg_drop_yn == "Y":
+            try:
                 try:
                     target_hook.run(drop_stg_sql)
-                    print(f"{stg_table} dropped (stg_drop_yn=Y)")
+                    print(f"{stg_table} dropped before recreate")
                 except Exception:
-                    print(f"{stg_table} drop failed after success")
-            else:
-                print(
-                    f"{stg_table} kept "
-                    f"(job_succeeded={job_succeeded}, stg_drop_yn={stg_drop_yn})"
+                    print(f"{stg_table} drop skipped (not exists or drop failed before recreate)")
+
+                target_hook.run(create_stg_sql)
+                print(f"{stg_table} created")
+
+                if create_stg_pk_sql:
+                    target_hook.run(create_stg_pk_sql)
+                    print(f"{stg_table} primary key created: {pk_columns}")
+                else:
+                    print(f"{stg_table} primary key creation skipped (no pk_columns)")
+
+                source_conn = source_hook.get_conn()
+
+                meta_cursor = source_conn.cursor()
+                meta_sql = build_limit_0_sql(source_exec_sql)
+                meta_cursor.execute(meta_sql)
+
+                if meta_cursor.description is None:
+                    raise ValueError(
+                        f"{target_table}: source_exec_sql did not return a result set. "
+                        f"Only SELECT query is allowed. source_exec_sql=[{source_exec_sql}]"
+                    )
+
+                source_columns = [desc[0] for desc in meta_cursor.description]
+
+                if not source_columns:
+                    raise ValueError(
+                        f"{target_table}: source_exec_sql returned no columns. "
+                        f"source_exec_sql=[{source_exec_sql}]"
+                    )
+
+                column_mapping = parse_column_mapping(raw_column_mapping) or {}
+
+                target_columns = [
+                    column_mapping.get(src_col, src_col)
+                    for src_col in source_columns
+                ]
+
+                if not target_columns:
+                    raise ValueError(
+                        f"{target_table}: mapped target_columns is empty"
+                    )
+
+                if len(set(target_columns)) != len(target_columns):
+                    raise ValueError(
+                        f"{target_table}: duplicate target columns detected after mapping. "
+                        f"source_columns={source_columns}, target_columns={target_columns}"
+                    )
+
+                missing_pk_columns = [pk for pk in pk_columns if pk not in target_columns]
+                if missing_pk_columns:
+                    raise ValueError(
+                        f"{target_table}: mapped result does not include PK columns: "
+                        f"{missing_pk_columns}. "
+                        f"source_columns={source_columns}, "
+                        f"target_columns={target_columns}"
+                    )
+
+                insert_sql = build_insert_sql(target_table, stg_table, target_columns)
+                insert_not_exists_sql = build_insert_not_exists_sql(
+                    target_table=target_table,
+                    stg_table=stg_table,
+                    target_columns=target_columns,
+                    pk_columns=pk_columns,
                 )
+                delete_sql = build_delete_sql(
+                    target_table=target_table,
+                    stg_table=stg_table,
+                    pk_columns=pk_columns,
+                )
+                merge_ui_sql = build_merge_ui_sql(
+                    target_table=target_table,
+                    stg_table=stg_table,
+                    target_columns=target_columns,
+                    pk_columns=pk_columns,
+                )
+                merge_update_sql = build_merge_update_sql(
+                    target_table=target_table,
+                    stg_table=stg_table,
+                    target_columns=target_columns,
+                    pk_columns=pk_columns,
+                )
+
+                stg_insert_sql = build_stg_insert_sql(stg_table, target_columns)
+
+                target_stg_conn = target_hook.get_conn()
+                target_stg_conn.autocommit = False
+                target_stg_cursor = target_stg_conn.cursor()
+
+                try:
+                    target_stg_cursor.fast_executemany = True
+                except Exception:
+                    pass
+
+                source_cursor = source_conn.cursor()
+                source_cursor.arraysize = CHUNK_SIZE
+                source_cursor.execute(source_exec_sql)
+
+                while True:
+                    rows = source_cursor.fetchmany(CHUNK_SIZE)
+
+                    if not rows:
+                        break
+
+                    normalized_rows = normalize_rows_for_odbc(
+                        rows=rows,
+                        column_count=len(target_columns),
+                    )
+
+                    if not normalized_rows:
+                        continue
+
+                    target_stg_cursor.executemany(stg_insert_sql, normalized_rows)
+                    target_stg_conn.commit()
+
+                    extract_row_count += len(normalized_rows)
+                    stg_load_row_count += len(normalized_rows)
+
+                    print(
+                        f"{source_table or '[source_sql]'} -> {stg_table} "
+                        f"chunk={len(normalized_rows)} total={stg_load_row_count} "
+                        f"source_columns={source_columns} "
+                        f"target_columns={target_columns}"
+                    )
+
+                target_stg_cursor.close()
+                target_stg_cursor = None
+                target_stg_conn.close()
+                target_stg_conn = None
+
+                if stg_load_row_count > 0:
+                    target_tx_conn = target_hook.get_conn()
+                    target_tx_conn.autocommit = False
+                    target_tx_cursor = target_tx_conn.cursor()
+
+                    try:
+                        if target_pre_sql:
+                            target_tx_cursor.execute(target_pre_sql)
+                            print(f"{target_table} target_pre_sql completed")
+
+                        if load_option == "ui":
+                            target_tx_cursor.execute(merge_ui_sql)
+                            print(
+                                f"{stg_table} -> {target_table} MERGE completed (UI), total={stg_load_row_count}"
+                            )
+
+                        elif load_option == "di":
+                            target_tx_cursor.execute(delete_sql)
+                            print(f"{target_table} DELETE completed")
+
+                            target_tx_cursor.execute(insert_sql)
+                            target_insert_count = stg_load_row_count
+                            print(
+                                f"{stg_table} -> {target_table} INSERT completed (DI), total={stg_load_row_count}"
+                            )
+
+                        elif load_option == "ti":
+                            target_tx_cursor.execute(truncate_target_sql)
+                            print(f"{target_table} TRUNCATE completed")
+
+                            target_tx_cursor.execute(insert_sql)
+                            target_insert_count = stg_load_row_count
+                            print(
+                                f"{stg_table} -> {target_table} INSERT completed (TI), total={stg_load_row_count}"
+                            )
+
+                        elif load_option == "i":
+                            target_tx_cursor.execute(insert_sql)
+                            target_insert_count = stg_load_row_count
+                            print(
+                                f"{stg_table} -> {target_table} INSERT completed (I), total={stg_load_row_count}"
+                            )
+
+                        elif load_option == "u":
+                            if not merge_update_sql:
+                                print(
+                                    f"{target_table}: no non-pk columns to update, UPDATE skipped (U)"
+                                )
+                            else:
+                                target_tx_cursor.execute(merge_update_sql)
+                                print(f"{target_table} MERGE UPDATE completed (U)")
+
+                        elif load_option == "d":
+                            target_tx_cursor.execute(delete_sql)
+                            print(f"{target_table} DELETE completed (D)")
+
+                        if target_post_sql:
+                            target_tx_cursor.execute(target_post_sql)
+                            print(f"{target_table} target_post_sql completed")
+
+                        target_tx_conn.commit()
+                        job_succeeded = True
+
+                    except Exception:
+                        target_tx_conn.rollback()
+                        raise
+
+                else:
+                    print(f"{target_table}: no rows fetched, target load skipped")
+                    job_succeeded = True
+
+            finally:
+                if meta_cursor is not None:
+                    meta_cursor.close()
+
+                if source_cursor is not None:
+                    source_cursor.close()
+
+                if source_conn is not None:
+                    source_conn.close()
+
+                if target_stg_cursor is not None:
+                    target_stg_cursor.close()
+
+                if target_stg_conn is not None:
+                    target_stg_conn.close()
+
+                if target_tx_cursor is not None:
+                    target_tx_cursor.close()
+
+                if target_tx_conn is not None:
+                    target_tx_conn.close()
+
+                if job_succeeded and stg_drop_yn == "Y":
+                    try:
+                        target_hook.run(drop_stg_sql)
+                        print(f"{stg_table} dropped (stg_drop_yn=Y)")
+                    except Exception:
+                        print(f"{stg_table} drop failed after success")
+                else:
+                    print(
+                        f"{stg_table} kept "
+                        f"(job_succeeded={job_succeeded}, stg_drop_yn={stg_drop_yn})"
+                    )
+
+            update_etl_run_hist_success(
+                run_hist_id=run_hist_id,
+                extract_row_count=extract_row_count,
+                stg_load_row_count=stg_load_row_count,
+                target_insert_count=target_insert_count,
+                target_update_count=target_update_count,
+                target_delete_count=target_delete_count,
+                file_write_row_count=file_write_row_count,
+                target_file_path=target_file_path,
+            )
+
+        except Exception:
+            if run_hist_id is not None:
+                update_etl_run_hist_failed(
+                    run_hist_id=run_hist_id,
+                    error_message=traceback.format_exc(),
+                    extract_row_count=extract_row_count,
+                    stg_load_row_count=stg_load_row_count,
+                    target_insert_count=target_insert_count,
+                    target_update_count=target_update_count,
+                    target_delete_count=target_delete_count,
+                    file_write_row_count=file_write_row_count,
+                    target_file_path=target_file_path,
+                )
+            raise
 
     table_configs = get_table_configs()
     run_etl.expand(table_config=table_configs)

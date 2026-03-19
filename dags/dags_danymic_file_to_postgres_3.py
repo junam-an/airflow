@@ -3,12 +3,20 @@ from __future__ import annotations
 import csv
 import json
 import subprocess
+import traceback
 from datetime import datetime
 from pathlib import Path
 
 from airflow import DAG
 from airflow.decorators import task
 from airflow.providers.postgres.hooks.postgres import PostgresHook
+
+from common.etl_hist_utils import (
+    get_task_runtime_info,
+    insert_etl_run_hist,
+    update_etl_run_hist_success,
+    update_etl_run_hist_failed,
+)
 
 
 DAG_ID = "DYNAMIC_FILE_TO_POSTGRES_ETL_META_3"
@@ -274,7 +282,6 @@ def read_file_all_rows(
         if not content:
             raise ValueError(f"JSON file is empty: {file_path}")
 
-        # JSON Array
         if content.startswith("["):
             obj = json.loads(content)
 
@@ -302,7 +309,6 @@ def read_file_all_rows(
 
             return source_columns, all_rows
 
-        # NDJSON
         lines = [line.strip() for line in content.splitlines() if line.strip()]
         if not lines:
             return [], []
@@ -488,12 +494,7 @@ with DAG(
 
             normalized_source_file_encoding = normalize_file_encoding(source_file_encoding)
             parsed_config_option = parse_config_option(config_option)
-
-            target_driver_type = parsed_config_option.get("TARGET_DRIVER_TYPE", "").strip().upper()
-            target_conn_name = parsed_config_option.get("TARGET_CONN_NAME", "").strip()
-            target_db_type = parsed_config_option.get("TARGET_DB_TYPE", "").strip().upper()
-            target_db_host = parsed_config_option.get("TARGET_DB_HOST", "").strip()
-            target_db_port = parsed_config_option.get("TARGET_DB_PORT", "").strip()
+            target_conn_name = (parsed_config_option.get("TARGET_CONN_NAME") or "").strip()
 
             if not source_table:
                 raise ValueError("etl_meta_file_to_db.source_table(file_name/pattern) is empty")
@@ -534,18 +535,6 @@ with DAG(
                     f"{target_table}: pk_column is required for load_option [{load_option}]"
                 )
 
-            if target_driver_type != "POSTGRESHOOK":
-                raise ValueError(
-                    f"{target_table}: config_option.TARGET_DRIVER_TYPE must be 'POSTGRESHOOK'. "
-                    f"current=[{parsed_config_option.get('TARGET_DRIVER_TYPE', '')}]"
-                )
-
-            if target_db_type != "POSTGRES":
-                raise ValueError(
-                    f"{target_table}: config_option.TARGET_DB_TYPE must be 'POSTGRES'. "
-                    f"current=[{parsed_config_option.get('TARGET_DB_TYPE', '')}]"
-                )
-
             if not target_conn_name:
                 raise ValueError(
                     f"{target_table}: config_option.TARGET_CONN_NAME is empty"
@@ -569,17 +558,15 @@ with DAG(
                     "config_option": parsed_config_option,
                     "input_param": input_param,
                     "target_conn_name": target_conn_name,
-                    "target_driver_type": target_driver_type,
-                    "target_db_type": target_db_type,
-                    "target_db_host": target_db_host,
-                    "target_db_port": target_db_port,
                 }
             )
 
         return configs
 
     @task(pool_slots=1)
-    def run_etl(table_config: dict):
+    def run_etl(table_config: dict, **context):
+        runtime_info = get_task_runtime_info(**context)
+
         source_table = (table_config.get("source_table") or "").strip()
         target_table = (table_config.get("target_table") or "").strip()
         pk_columns = table_config.get("pk_columns") or []
@@ -596,11 +583,17 @@ with DAG(
         raw_target_post_sql = (table_config.get("target_post_sql") or "").strip()
         raw_input_param = table_config.get("input_param")
 
+        config_option = table_config.get("config_option") or {}
         target_conn_name = (table_config.get("target_conn_name") or "").strip()
-        target_driver_type = (table_config.get("target_driver_type") or "").strip().upper()
-        target_db_type = (table_config.get("target_db_type") or "").strip().upper()
-        target_db_host = (table_config.get("target_db_host") or "").strip()
-        target_db_port = (table_config.get("target_db_port") or "").strip()
+
+        run_hist_id = None
+        extract_row_count = 0
+        stg_load_row_count = 0
+        target_insert_count = 0
+        target_update_count = 0
+        target_delete_count = 0
+        file_write_row_count = 0
+        target_file_path = ""
 
         if not source_table:
             raise ValueError("table_config.source_table(file_name/pattern) is empty")
@@ -631,350 +624,373 @@ with DAG(
                 f"{target_table}: pk_columns is required for load_option [{load_option}]"
             )
 
-        if target_driver_type != "POSTGRESHOOK":
-            raise ValueError(
-                f"{target_table}: target_driver_type must be 'POSTGRESHOOK'. current=[{target_driver_type}]"
-            )
-
-        if target_db_type != "POSTGRES":
-            raise ValueError(
-                f"{target_table}: target_db_type must be 'POSTGRES'. current=[{target_db_type}]"
-            )
-
-        if not target_conn_name:
-            raise ValueError(
-                f"{target_table}: target_conn_name is empty"
-            )
-
-        input_params = parse_input_params(raw_input_param)
-
-        source_file_type = apply_input_params(raw_source_file_type, input_params).lower()
-        csv_file_delimiter = apply_input_params(raw_csv_file_delimiter, input_params)
-        normalized_csv_file_delimiter = normalize_csv_delimiter(csv_file_delimiter)
-
-        source_file_encoding = apply_input_params(raw_source_file_encoding, input_params)
-        normalized_source_file_encoding = normalize_file_encoding(source_file_encoding)
-
-        source_file_dir = apply_input_params(raw_source_file_dir, input_params)
-        source_pre_cmd = apply_input_params(raw_source_pre_cmd, input_params)
-        target_pre_sql = apply_input_params(raw_target_pre_sql, input_params)
-        target_post_sql = apply_input_params(raw_target_post_sql, input_params)
-        source_file_pattern = apply_input_params(source_table, input_params)
-
-        if source_file_type == "csv" and not normalized_csv_file_delimiter:
-            raise ValueError(
-                f"{target_table}: csv_file_delimiter is empty after param replacement"
-            )
-
-        source_dir_path = Path(source_file_dir)
-        matched_files = sorted(source_dir_path.glob(source_file_pattern))
-
-        print(f"[DEBUG] target_conn_name={target_conn_name}")
-        print(f"[DEBUG] target_driver_type={target_driver_type}")
-        print(f"[DEBUG] target_db_type={target_db_type}")
-        print(f"[DEBUG] target_db_host={target_db_host}")
-        print(f"[DEBUG] target_db_port={target_db_port}")
-        print(f"[DEBUG] source_file_dir={source_file_dir}")
-        print(f"[DEBUG] source_file_pattern={source_file_pattern}")
-        print(f"[DEBUG] matched_files={[str(p) for p in matched_files]}")
-        print(f"[DEBUG] matched_file_count={len(matched_files)}")
-        print(f"[DEBUG] source_file_type={source_file_type}")
-        print(f"[DEBUG] csv_file_delimiter_raw={csv_file_delimiter}")
-        print(f"[DEBUG] csv_file_delimiter_normalized={repr(normalized_csv_file_delimiter)}")
-        print(f"[DEBUG] source_file_encoding_raw={source_file_encoding}")
-        print(f"[DEBUG] source_file_encoding_normalized={normalized_source_file_encoding}")
-
-        if not matched_files:
-            raise FileNotFoundError(
-                f"{target_table}: no source files matched. "
-                f"source_file_dir=[{source_file_dir}], source_table(pattern)=[{source_file_pattern}]"
-            )
-
-        stg_table = f"stg_{target_table}"
-
-        create_stg_sql = f"""
-            CREATE TABLE IF NOT EXISTS {stg_table}
-            (LIKE {target_table} INCLUDING ALL)
-        """
-
-        truncate_stg_sql = f"TRUNCATE TABLE {stg_table}"
-        truncate_target_sql = f"TRUNCATE TABLE {target_table}"
-        drop_stg_sql = f"DROP TABLE IF EXISTS {stg_table}"
-
-        target_hook = PostgresHook(postgres_conn_id=target_conn_name)
-
-        target_tx_conn = None
-        target_tx_cursor = None
-
-        total_rows = 0
-        job_succeeded = False
-
         try:
-            # 1) source file 읽기 전 OS command 수행
-            if source_pre_cmd:
-                completed = subprocess.run(
-                    source_pre_cmd,
-                    shell=True,
-                    check=True,
-                    capture_output=True,
-                    text=True,
+            if not target_conn_name:
+                raise ValueError(
+                    f"{target_table}: config_option.TARGET_CONN_NAME is empty"
                 )
-                if completed.stdout:
-                    print(completed.stdout)
-                if completed.stderr:
-                    print(completed.stderr)
 
-            # 2) STG 준비
-            target_hook.run(create_stg_sql)
-            target_hook.run(truncate_stg_sql)
+            run_hist_id = insert_etl_run_hist(
+                dag_id=DAG_ID,
+                run_id=runtime_info["run_id"],
+                task_id=runtime_info["task_id"],
+                map_index=runtime_info["map_index"],
+                source_table=source_table,
+                target_table=target_table,
+                load_option=load_option,
+                source_conn_name="",
+                target_conn_name=target_conn_name,
+                input_param=raw_input_param,
+                config_option=config_option,
+            )
 
-            column_mapping = parse_column_mapping(raw_column_mapping) or {}
+            input_params = parse_input_params(raw_input_param)
 
-            if source_file_type == "text":
-                if column_mapping:
-                    if len(column_mapping) != 1:
-                        raise ValueError(
-                            f"{target_table}: text file requires exactly one column mapping"
-                        )
-                    text_source_column = list(column_mapping.keys())[0]
+            source_file_type = apply_input_params(raw_source_file_type, input_params).lower()
+            csv_file_delimiter = apply_input_params(raw_csv_file_delimiter, input_params)
+            normalized_csv_file_delimiter = normalize_csv_delimiter(csv_file_delimiter)
+
+            source_file_encoding = apply_input_params(raw_source_file_encoding, input_params)
+            normalized_source_file_encoding = normalize_file_encoding(source_file_encoding)
+
+            source_file_dir = apply_input_params(raw_source_file_dir, input_params)
+            source_pre_cmd = apply_input_params(raw_source_pre_cmd, input_params)
+            target_pre_sql = apply_input_params(raw_target_pre_sql, input_params)
+            target_post_sql = apply_input_params(raw_target_post_sql, input_params)
+            source_file_pattern = apply_input_params(source_table, input_params)
+
+            if source_file_type == "csv" and not normalized_csv_file_delimiter:
+                raise ValueError(
+                    f"{target_table}: csv_file_delimiter is empty after param replacement"
+                )
+
+            source_dir_path = Path(source_file_dir)
+            matched_files = sorted(source_dir_path.glob(source_file_pattern))
+
+            print(f"[DEBUG] target_conn_name={target_conn_name}")
+            print(f"[DEBUG] source_file_dir={source_file_dir}")
+            print(f"[DEBUG] source_file_pattern={source_file_pattern}")
+            print(f"[DEBUG] matched_files={[str(p) for p in matched_files]}")
+            print(f"[DEBUG] matched_file_count={len(matched_files)}")
+            print(f"[DEBUG] source_file_type={source_file_type}")
+            print(f"[DEBUG] csv_file_delimiter_raw={csv_file_delimiter}")
+            print(f"[DEBUG] csv_file_delimiter_normalized={repr(normalized_csv_file_delimiter)}")
+            print(f"[DEBUG] source_file_encoding_raw={source_file_encoding}")
+            print(f"[DEBUG] source_file_encoding_normalized={normalized_source_file_encoding}")
+
+            if not matched_files:
+                raise FileNotFoundError(
+                    f"{target_table}: no source files matched. "
+                    f"source_file_dir=[{source_file_dir}], source_table(pattern)=[{source_file_pattern}]"
+                )
+
+            stg_table = f"stg_{target_table}"
+
+            create_stg_sql = f"""
+                CREATE TABLE IF NOT EXISTS {stg_table}
+                (LIKE {target_table} INCLUDING ALL)
+            """
+
+            truncate_stg_sql = f"TRUNCATE TABLE {stg_table}"
+            truncate_target_sql = f"TRUNCATE TABLE {target_table}"
+            drop_stg_sql = f"DROP TABLE IF EXISTS {stg_table}"
+
+            target_hook = PostgresHook(postgres_conn_id=target_conn_name)
+
+            target_tx_conn = None
+            target_tx_cursor = None
+
+            job_succeeded = False
+
+            try:
+                if source_pre_cmd:
+                    completed = subprocess.run(
+                        source_pre_cmd,
+                        shell=True,
+                        check=True,
+                        capture_output=True,
+                        text=True,
+                    )
+                    if completed.stdout:
+                        print(completed.stdout)
+                    if completed.stderr:
+                        print(completed.stderr)
+
+                target_hook.run(create_stg_sql)
+                target_hook.run(truncate_stg_sql)
+
+                column_mapping = parse_column_mapping(raw_column_mapping) or {}
+
+                if source_file_type == "text":
+                    if column_mapping:
+                        if len(column_mapping) != 1:
+                            raise ValueError(
+                                f"{target_table}: text file requires exactly one column mapping"
+                            )
+                        text_source_column = list(column_mapping.keys())[0]
+                    else:
+                        text_source_column = "line_text"
                 else:
                     text_source_column = "line_text"
-            else:
-                text_source_column = "line_text"
 
-            expected_source_columns = None
-            target_columns = None
+                expected_source_columns = None
+                target_columns = None
 
-            # 3) 여러 파일 -> STG 누적 적재
-            for file_path in matched_files:
-                source_columns, all_rows = read_file_all_rows(
-                    file_path=str(file_path),
-                    file_type=source_file_type,
-                    text_source_column=text_source_column,
-                    csv_file_delimiter=normalized_csv_file_delimiter,
-                    encoding=normalized_source_file_encoding,
-                )
-
-                print(f"[DEBUG] current_file={str(file_path)}")
-                print(f"[DEBUG] source_columns={source_columns}")
-                print(f"[DEBUG] total_read_rows={len(all_rows)}")
-                print(f"[DEBUG] sample_rows={all_rows[:5]}")
-
-                if not source_columns and not all_rows:
-                    print(f"{target_table}: source file has no rows [{file_path}]")
-                    continue
-
-                if source_file_type in ("csv", "json") and not source_columns:
-                    raise ValueError(
-                        f"{target_table}: no source columns detected from file [{file_path}]"
+                for file_path in matched_files:
+                    source_columns, all_rows = read_file_all_rows(
+                        file_path=str(file_path),
+                        file_type=source_file_type,
+                        text_source_column=text_source_column,
+                        csv_file_delimiter=normalized_csv_file_delimiter,
+                        encoding=normalized_source_file_encoding,
                     )
 
-                # 첫 파일 기준 컬럼 확정
-                if expected_source_columns is None:
-                    expected_source_columns = source_columns
+                    print(f"[DEBUG] current_file={str(file_path)}")
+                    print(f"[DEBUG] source_columns={source_columns}")
+                    print(f"[DEBUG] total_read_rows={len(all_rows)}")
+                    print(f"[DEBUG] sample_rows={all_rows[:5]}")
 
-                    target_columns = [
-                        column_mapping.get(src_col, src_col)
-                        for src_col in expected_source_columns
-                    ]
+                    if not source_columns and not all_rows:
+                        print(f"{target_table}: source file has no rows [{file_path}]")
+                        continue
 
-                    if not target_columns and all_rows:
+                    if source_file_type in ("csv", "json") and not source_columns:
                         raise ValueError(
-                            f"{target_table}: mapped target_columns is empty"
+                            f"{target_table}: no source columns detected from file [{file_path}]"
                         )
 
-                    if len(set(target_columns)) != len(target_columns):
-                        raise ValueError(
-                            f"{target_table}: duplicate target columns detected after mapping. "
-                            f"source_columns={expected_source_columns}, target_columns={target_columns}"
-                        )
+                    if expected_source_columns is None:
+                        expected_source_columns = source_columns
 
-                    missing_pk_columns = [
-                        pk for pk in pk_columns if pk not in target_columns
-                    ]
-                    if missing_pk_columns:
-                        raise ValueError(
-                            f"{target_table}: mapped result does not include PK columns: "
-                            f"{missing_pk_columns}. "
-                            f"source_columns={expected_source_columns}, target_columns={target_columns}"
-                        )
+                        target_columns = [
+                            column_mapping.get(src_col, src_col)
+                            for src_col in expected_source_columns
+                        ]
 
-                else:
-                    # 여러 파일 컬럼 구조 일치 여부 검증
-                    if source_columns != expected_source_columns:
-                        raise ValueError(
-                            f"{target_table}: source columns mismatch across files. "
-                            f"expected={expected_source_columns}, current={source_columns}, file={file_path}"
-                        )
-
-                if all_rows:
-                    target_hook.insert_rows(
-                        table=stg_table,
-                        rows=all_rows,
-                        target_fields=target_columns,
-                        commit_every=max(1, len(all_rows)),
-                        executemany=True,
-                    )
-
-                    stg_count = target_hook.get_first(
-                        f"SELECT COUNT(*) FROM {stg_table}"
-                    )[0]
-
-                    total_rows += len(all_rows)
-
-                    print(
-                        f"{file_path} -> {stg_table} "
-                        f"file_rows={len(all_rows)} "
-                        f"total_rows={total_rows} "
-                        f"stg_count_after_insert={stg_count} "
-                        f"source_columns={source_columns} "
-                        f"target_columns={target_columns}"
-                    )
-
-            # STG에 1건 이상 적재된 경우에만 SQL 생성/반영
-            if total_rows > 0:
-                insert_columns_sql = ", ".join(target_columns)
-                select_columns_sql = ", ".join([f"s.{col}" for col in target_columns])
-
-                insert_sql = f"""
-                    INSERT INTO {target_table} ({insert_columns_sql})
-                    SELECT {select_columns_sql}
-                    FROM {stg_table} s
-                """
-
-                pk_join_condition_sql = " AND ".join(
-                    [f"t.{pk} = s.{pk}" for pk in pk_columns]
-                )
-
-                non_pk_columns = [c for c in target_columns if c not in pk_columns]
-
-                if non_pk_columns:
-                    update_set_sql = ", ".join(
-                        [f"{col} = s.{col}" for col in non_pk_columns]
-                    )
-
-                    update_sql = f"""
-                        UPDATE {target_table} t
-                        SET {update_set_sql}
-                        FROM {stg_table} s
-                        WHERE {pk_join_condition_sql}
-                    """
-                else:
-                    update_sql = None
-
-                not_exists_condition_sql = " AND ".join(
-                    [f"t.{pk} = s.{pk}" for pk in pk_columns]
-                )
-
-                insert_not_exists_sql = f"""
-                    INSERT INTO {target_table} ({insert_columns_sql})
-                    SELECT {select_columns_sql}
-                    FROM {stg_table} s
-                    WHERE NOT EXISTS (
-                        SELECT 1
-                        FROM {target_table} t
-                        WHERE {not_exists_condition_sql}
-                    )
-                """
-
-                delete_sql = f"""
-                    DELETE FROM {target_table} t
-                    WHERE EXISTS (
-                        SELECT 1
-                        FROM {stg_table} s
-                        WHERE {pk_join_condition_sql}
-                    )
-                """
-
-                # 4) STG -> TARGET
-                target_tx_conn = target_hook.get_conn()
-                target_tx_conn.autocommit = False
-                target_tx_cursor = target_tx_conn.cursor()
-
-                try:
-                    if target_pre_sql:
-                        target_tx_cursor.execute(target_pre_sql)
-                        print(f"{target_table} target_pre_sql completed")
-
-                    if load_option == "ui":
-                        if update_sql:
-                            target_tx_cursor.execute(update_sql)
-                            print(f"{target_table} UPDATE completed")
-
-                        target_tx_cursor.execute(insert_not_exists_sql)
-                        print(
-                            f"{stg_table} -> {target_table} INSERT completed (UI), total={total_rows}"
-                        )
-
-                    elif load_option == "di":
-                        target_tx_cursor.execute(delete_sql)
-                        print(f"{target_table} DELETE completed")
-
-                        target_tx_cursor.execute(insert_sql)
-                        print(
-                            f"{stg_table} -> {target_table} INSERT completed (DI), total={total_rows}"
-                        )
-
-                    elif load_option == "ti":
-                        target_tx_cursor.execute(truncate_target_sql)
-                        print(f"{target_table} TRUNCATE completed")
-
-                        target_tx_cursor.execute(insert_sql)
-                        print(
-                            f"{stg_table} -> {target_table} INSERT completed (TI), total={total_rows}"
-                        )
-
-                    elif load_option == "i":
-                        target_tx_cursor.execute(insert_sql)
-                        print(
-                            f"{stg_table} -> {target_table} INSERT completed (I), total={total_rows}"
-                        )
-
-                    elif load_option == "u":
-                        if not update_sql:
-                            print(
-                                f"{target_table}: no non-pk columns to update, UPDATE skipped (U)"
+                        if not target_columns and all_rows:
+                            raise ValueError(
+                                f"{target_table}: mapped target_columns is empty"
                             )
-                        else:
-                            target_tx_cursor.execute(update_sql)
-                            print(f"{target_table} UPDATE completed (U)")
 
-                    elif load_option == "d":
-                        target_tx_cursor.execute(delete_sql)
-                        print(f"{target_table} DELETE completed (D)")
+                        if len(set(target_columns)) != len(target_columns):
+                            raise ValueError(
+                                f"{target_table}: duplicate target columns detected after mapping. "
+                                f"source_columns={expected_source_columns}, target_columns={target_columns}"
+                            )
 
-                    if target_post_sql:
-                        target_tx_cursor.execute(target_post_sql)
-                        print(f"{target_table} target_post_sql completed")
+                        missing_pk_columns = [
+                            pk for pk in pk_columns if pk not in target_columns
+                        ]
+                        if missing_pk_columns:
+                            raise ValueError(
+                                f"{target_table}: mapped result does not include PK columns: "
+                                f"{missing_pk_columns}. "
+                                f"source_columns={expected_source_columns}, target_columns={target_columns}"
+                            )
 
-                    target_tx_conn.commit()
+                    else:
+                        if source_columns != expected_source_columns:
+                            raise ValueError(
+                                f"{target_table}: source columns mismatch across files. "
+                                f"expected={expected_source_columns}, current={source_columns}, file={file_path}"
+                            )
+
+                    if all_rows:
+                        target_hook.insert_rows(
+                            table=stg_table,
+                            rows=all_rows,
+                            target_fields=target_columns,
+                            commit_every=max(1, len(all_rows)),
+                            executemany=True,
+                        )
+
+                        stg_count = target_hook.get_first(
+                            f"SELECT COUNT(*) FROM {stg_table}"
+                        )[0]
+
+                        extract_row_count += len(all_rows)
+                        stg_load_row_count += len(all_rows)
+
+                        print(
+                            f"{file_path} -> {stg_table} "
+                            f"file_rows={len(all_rows)} "
+                            f"total_rows={stg_load_row_count} "
+                            f"stg_count_after_insert={stg_count} "
+                            f"source_columns={source_columns} "
+                            f"target_columns={target_columns}"
+                        )
+
+                if stg_load_row_count > 0:
+                    insert_columns_sql = ", ".join(target_columns)
+                    select_columns_sql = ", ".join([f"s.{col}" for col in target_columns])
+
+                    insert_sql = f"""
+                        INSERT INTO {target_table} ({insert_columns_sql})
+                        SELECT {select_columns_sql}
+                        FROM {stg_table} s
+                    """
+
+                    pk_join_condition_sql = " AND ".join(
+                        [f"t.{pk} = s.{pk}" for pk in pk_columns]
+                    )
+
+                    non_pk_columns = [c for c in target_columns if c not in pk_columns]
+
+                    if non_pk_columns:
+                        update_set_sql = ", ".join(
+                            [f"{col} = s.{col}" for col in non_pk_columns]
+                        )
+
+                        update_sql = f"""
+                            UPDATE {target_table} t
+                            SET {update_set_sql}
+                            FROM {stg_table} s
+                            WHERE {pk_join_condition_sql}
+                        """
+                    else:
+                        update_sql = None
+
+                    not_exists_condition_sql = " AND ".join(
+                        [f"t.{pk} = s.{pk}" for pk in pk_columns]
+                    )
+
+                    insert_not_exists_sql = f"""
+                        INSERT INTO {target_table} ({insert_columns_sql})
+                        SELECT {select_columns_sql}
+                        FROM {stg_table} s
+                        WHERE NOT EXISTS (
+                            SELECT 1
+                            FROM {target_table} t
+                            WHERE {not_exists_condition_sql}
+                        )
+                    """
+
+                    delete_sql = f"""
+                        DELETE FROM {target_table} t
+                        WHERE EXISTS (
+                            SELECT 1
+                            FROM {stg_table} s
+                            WHERE {pk_join_condition_sql}
+                        )
+                    """
+
+                    target_tx_conn = target_hook.get_conn()
+                    target_tx_conn.autocommit = False
+                    target_tx_cursor = target_tx_conn.cursor()
+
+                    try:
+                        if target_pre_sql:
+                            target_tx_cursor.execute(target_pre_sql)
+                            print(f"{target_table} target_pre_sql completed")
+
+                        if load_option == "ui":
+                            if update_sql:
+                                target_tx_cursor.execute(update_sql)
+                                print(f"{target_table} UPDATE completed")
+
+                            target_tx_cursor.execute(insert_not_exists_sql)
+                            print(
+                                f"{stg_table} -> {target_table} INSERT completed (UI), total={stg_load_row_count}"
+                            )
+
+                        elif load_option == "di":
+                            target_tx_cursor.execute(delete_sql)
+                            print(f"{target_table} DELETE completed")
+
+                            target_tx_cursor.execute(insert_sql)
+                            target_insert_count = stg_load_row_count
+                            print(
+                                f"{stg_table} -> {target_table} INSERT completed (DI), total={stg_load_row_count}"
+                            )
+
+                        elif load_option == "ti":
+                            target_tx_cursor.execute(truncate_target_sql)
+                            print(f"{target_table} TRUNCATE completed")
+
+                            target_tx_cursor.execute(insert_sql)
+                            target_insert_count = stg_load_row_count
+                            print(
+                                f"{stg_table} -> {target_table} INSERT completed (TI), total={stg_load_row_count}"
+                            )
+
+                        elif load_option == "i":
+                            target_tx_cursor.execute(insert_sql)
+                            target_insert_count = stg_load_row_count
+                            print(
+                                f"{stg_table} -> {target_table} INSERT completed (I), total={stg_load_row_count}"
+                            )
+
+                        elif load_option == "u":
+                            if not update_sql:
+                                print(
+                                    f"{target_table}: no non-pk columns to update, UPDATE skipped (U)"
+                                )
+                            else:
+                                target_tx_cursor.execute(update_sql)
+                                print(f"{target_table} UPDATE completed (U)")
+
+                        elif load_option == "d":
+                            target_tx_cursor.execute(delete_sql)
+                            print(f"{target_table} DELETE completed (D)")
+
+                        if target_post_sql:
+                            target_tx_cursor.execute(target_post_sql)
+                            print(f"{target_table} target_post_sql completed")
+
+                        target_tx_conn.commit()
+                        job_succeeded = True
+
+                    except Exception:
+                        target_tx_conn.rollback()
+                        raise
+
+                else:
+                    print(
+                        f"{target_table}: no rows read from matched files, target load skipped"
+                    )
                     job_succeeded = True
 
-                except Exception:
-                    target_tx_conn.rollback()
-                    raise
+            finally:
+                if target_tx_cursor is not None:
+                    target_tx_cursor.close()
 
-            else:
-                print(
-                    f"{target_table}: no rows read from matched files, target load skipped"
+                if target_tx_conn is not None:
+                    target_tx_conn.close()
+
+                if job_succeeded and stg_drop_yn == "Y":
+                    target_hook.run(drop_stg_sql)
+                    print(f"{stg_table} dropped (stg_drop_yn=Y)")
+                else:
+                    print(
+                        f"{stg_table} kept "
+                        f"(job_succeeded={job_succeeded}, stg_drop_yn={stg_drop_yn})"
+                    )
+
+            update_etl_run_hist_success(
+                run_hist_id=run_hist_id,
+                extract_row_count=extract_row_count,
+                stg_load_row_count=stg_load_row_count,
+                target_insert_count=target_insert_count,
+                target_update_count=target_update_count,
+                target_delete_count=target_delete_count,
+                file_write_row_count=file_write_row_count,
+                target_file_path=target_file_path,
+            )
+
+        except Exception:
+            if run_hist_id is not None:
+                update_etl_run_hist_failed(
+                    run_hist_id=run_hist_id,
+                    error_message=traceback.format_exc(),
+                    extract_row_count=extract_row_count,
+                    stg_load_row_count=stg_load_row_count,
+                    target_insert_count=target_insert_count,
+                    target_update_count=target_update_count,
+                    target_delete_count=target_delete_count,
+                    file_write_row_count=file_write_row_count,
+                    target_file_path=target_file_path,
                 )
-                job_succeeded = True
-
-        finally:
-            if target_tx_cursor is not None:
-                target_tx_cursor.close()
-
-            if target_tx_conn is not None:
-                target_tx_conn.close()
-
-            if job_succeeded and stg_drop_yn == "Y":
-                target_hook.run(drop_stg_sql)
-                print(f"{stg_table} dropped (stg_drop_yn=Y)")
-            else:
-                print(
-                    f"{stg_table} kept "
-                    f"(job_succeeded={job_succeeded}, stg_drop_yn={stg_drop_yn})"
-                )
+            raise
 
     table_configs = get_table_configs()
     run_etl.expand(table_config=table_configs)
