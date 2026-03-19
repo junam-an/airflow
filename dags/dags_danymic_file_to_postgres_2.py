@@ -417,8 +417,6 @@ with DAG(
             cursor = conn.cursor()
 
             cursor.execute("SET TIME ZONE 'Asia/Seoul'")
-            cursor.execute(insert_etl_param_sql, (DAG_ID,))
-            conn.commit()
 
             cursor.execute(update_input_param_sql, (DAG_ID,))
             cursor.execute(select_meta_sql, (DAG_ID,))
