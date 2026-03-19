@@ -668,12 +668,7 @@ with DAG(
                     )
 
                 insert_sql = build_insert_sql(target_table, stg_table, target_columns)
-                insert_not_exists_sql = build_insert_not_exists_sql(
-                    target_table=target_table,
-                    stg_table=stg_table,
-                    target_columns=target_columns,
-                    pk_columns=pk_columns,
-                )
+
                 delete_sql = build_delete_sql(
                     target_table=target_table,
                     stg_table=stg_table,
