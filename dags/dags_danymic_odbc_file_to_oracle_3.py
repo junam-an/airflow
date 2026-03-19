@@ -491,6 +491,7 @@ with DAG(
     def get_table_configs():
         meta_hook = PostgresHook(postgres_conn_id=META_POSTGRES_CONN_ID)
 
+
         insert_etl_param_sql = """
         INSERT INTO ETL_PARAM
         WITH BASE_PARAM AS
@@ -505,11 +506,11 @@ with DAG(
         WHERE 1=1
         AND TODAY_DT = TO_CHAR(TIMEZONE('ASIA/SEOUL', CURRENT_DATE)::TIMESTAMP, 'YYYYMMDD')
         )
-        SELECT
+        SELECT 
         DAG_ID
         , A.SOURCE_TABLE
         , A.TARGET_TABLE
-        , '{"$$P_BASE_DT":"' || P_BASE_DT ||
+        , '{"$$P_BASE_DT":"' || P_BASE_DT || 
         '","$$P_START_DT":"' || P_START_DT ||
         '","$$P_END_DT":"' || P_END_DT ||
         '","$$P_START_TM":"' || (INPUT_PARAM::JSON ->> '$$P_END_TM') ||
@@ -520,7 +521,7 @@ with DAG(
         , A.INPUT_PARAM AS ASIS_PARAM
         , TIMEZONE('ASIA/SEOUL', NOW())::TIMESTAMP AS CREATED_TM
         , 'AIRFLOW' AS CREATE_USER_ID
-        FROM ETL_META_FILE_TO_DB A, BASE_PARAM B
+        FROM ETL_META_DB_TO_FILE A, BASE_PARAM B
         WHERE 1=1
         AND DAG_ID = %s
         AND DISABLE_DT = '20991231'
@@ -586,6 +587,8 @@ with DAG(
             cursor = conn.cursor()
 
             cursor.execute("SET TIME ZONE 'Asia/Seoul'")
+
+            
             cursor.execute(insert_etl_param_sql, (DAG_ID,))
             conn.commit()
 
@@ -627,12 +630,7 @@ with DAG(
 
             normalized_source_file_encoding = normalize_file_encoding(source_file_encoding)
             parsed_config_option = parse_config_option(config_option)
-
-            target_driver_type = parsed_config_option.get("TARGET_DRIVER_TYPE", "").strip().upper()
             target_conn_name = parsed_config_option.get("TARGET_CONN_NAME", "").strip()
-            target_db_type = parsed_config_option.get("TARGET_DB_TYPE", "").strip().upper()
-            target_db_host = parsed_config_option.get("TARGET_DB_HOST", "").strip()
-            target_db_port = parsed_config_option.get("TARGET_DB_PORT", "").strip()
 
             if not source_table:
                 raise ValueError("etl_meta_file_to_db.source_table(file_name/pattern) is empty")
@@ -673,18 +671,6 @@ with DAG(
                     f"{target_table}: pk_column is required for load_option [{load_option}]"
                 )
 
-            if target_driver_type != "ODBC":
-                raise ValueError(
-                    f"{target_table}: config_option.TARGET_DRIVER_TYPE must be 'ODBC'. "
-                    f"current=[{parsed_config_option.get('TARGET_DRIVER_TYPE', '')}]"
-                )
-
-            if target_db_type != "ORACLE":
-                raise ValueError(
-                    f"{target_table}: config_option.TARGET_DB_TYPE must be 'ORACLE'. "
-                    f"current=[{parsed_config_option.get('TARGET_DB_TYPE', '')}]"
-                )
-
             if not target_conn_name:
                 raise ValueError(
                     f"{target_table}: config_option.TARGET_CONN_NAME is empty"
@@ -708,10 +694,6 @@ with DAG(
                     "config_option": parsed_config_option,
                     "input_param": input_param,
                     "target_conn_name": target_conn_name,
-                    "target_driver_type": target_driver_type,
-                    "target_db_type": target_db_type,
-                    "target_db_host": target_db_host,
-                    "target_db_port": target_db_port,
                 }
             )
 
@@ -736,10 +718,6 @@ with DAG(
         raw_input_param = table_config.get("input_param")
 
         target_conn_name = (table_config.get("target_conn_name") or "").strip()
-        target_driver_type = (table_config.get("target_driver_type") or "").strip().upper()
-        target_db_type = (table_config.get("target_db_type") or "").strip().upper()
-        target_db_host = (table_config.get("target_db_host") or "").strip()
-        target_db_port = (table_config.get("target_db_port") or "").strip()
 
         if not source_table:
             raise ValueError("table_config.source_table(file_name/pattern) is empty")
@@ -768,16 +746,6 @@ with DAG(
         if load_option in ("ui", "di", "u", "d") and not pk_columns:
             raise ValueError(
                 f"{target_table}: pk_columns is required for load_option [{load_option}]"
-            )
-
-        if target_driver_type != "ODBC":
-            raise ValueError(
-                f"{target_table}: target_driver_type must be 'ODBC'. current=[{target_driver_type}]"
-            )
-
-        if target_db_type != "ORACLE":
-            raise ValueError(
-                f"{target_table}: target_db_type must be 'ORACLE'. current=[{target_db_type}]"
             )
 
         if not target_conn_name:
@@ -809,10 +777,6 @@ with DAG(
         matched_files = sorted(source_dir_path.glob(source_file_pattern))
 
         print(f"[DEBUG] target_conn_name={target_conn_name}")
-        print(f"[DEBUG] target_driver_type={target_driver_type}")
-        print(f"[DEBUG] target_db_type={target_db_type}")
-        print(f"[DEBUG] target_db_host={target_db_host}")
-        print(f"[DEBUG] target_db_port={target_db_port}")
         print(f"[DEBUG] source_file_dir={source_file_dir}")
         print(f"[DEBUG] source_file_pattern={source_file_pattern}")
         print(f"[DEBUG] matched_files={[str(p) for p in matched_files]}")

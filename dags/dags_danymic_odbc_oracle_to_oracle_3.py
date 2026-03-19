@@ -196,6 +196,7 @@ def build_limit_0_sql(source_exec_sql: str) -> str:
         WHERE 1 = 0
     """
 
+
 def build_create_stg_pk_sql(stg_table: str, pk_columns: list[str]) -> str | None:
     if not pk_columns:
         return None
@@ -208,6 +209,7 @@ def build_create_stg_pk_sql(stg_table: str, pk_columns: list[str]) -> str | None
         ADD CONSTRAINT {pk_name}
         PRIMARY KEY ({pk_columns_sql})
     """
+
 
 def build_insert_sql(target_table: str, stg_table: str, target_columns: list[str]) -> str:
     insert_columns_sql = ", ".join(target_columns)

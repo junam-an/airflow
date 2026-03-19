@@ -339,7 +339,6 @@ with DAG(
     def get_table_configs():
         meta_hook = PostgresHook(postgres_conn_id=META_POSTGRES_CONN_ID)
 
-
         insert_etl_param_sql = """
         INSERT INTO ETL_PARAM
         WITH BASE_PARAM AS
@@ -470,12 +469,7 @@ with DAG(
 
             normalized_target_file_encoding = normalize_file_encoding(target_file_encoding)
             parsed_config_option = parse_config_option(config_option)
-
-            source_driver_type = parsed_config_option.get("SOURCE_DRIVER_TYPE", "").strip().lower()
             source_conn_name = parsed_config_option.get("SOURCE_CONN_NAME", "").strip()
-            source_db_type = parsed_config_option.get("SOURCE_DB_TYPE", "").strip().lower()
-            source_db_host = parsed_config_option.get("SOURCE_DB_HOST", "").strip()
-            source_db_port = parsed_config_option.get("SOURCE_DB_PORT", "").strip()
 
             if not source_table:
                 raise ValueError("etl_meta.source_table is empty")
@@ -504,18 +498,6 @@ with DAG(
                     f"{target_table}: target_file_dir is empty"
                 )
 
-            if source_driver_type != "odbc":
-                raise ValueError(
-                    f"{target_table}: config_option.SOURCE_DRIVER_TYPE must be 'ODBC'. "
-                    f"current=[{parsed_config_option.get('SOURCE_DRIVER_TYPE', '')}]"
-                )
-
-            if source_db_type != "oracle":
-                raise ValueError(
-                    f"{target_table}: config_option.SOURCE_DB_TYPE must be 'ORACLE'. "
-                    f"current=[{parsed_config_option.get('SOURCE_DB_TYPE', '')}]"
-                )
-
             if not source_conn_name:
                 raise ValueError(
                     f"{target_table}: config_option.SOURCE_CONN_NAME is empty"
@@ -536,10 +518,6 @@ with DAG(
                     "input_param": input_param,
                     "config_option": parsed_config_option,
                     "source_conn_name": source_conn_name,
-                    "source_driver_type": source_driver_type,
-                    "source_db_type": source_db_type,
-                    "source_db_host": source_db_host,
-                    "source_db_port": source_db_port,
                 }
             )
 
@@ -559,10 +537,6 @@ with DAG(
         raw_target_post_cmd = (table_config.get("target_post_cmd") or "").strip()
         raw_input_param = table_config.get("input_param")
         source_conn_name = (table_config.get("source_conn_name") or "").strip()
-        source_driver_type = (table_config.get("source_driver_type") or "").strip().lower()
-        source_db_type = (table_config.get("source_db_type") or "").strip().lower()
-        source_db_host = (table_config.get("source_db_host") or "").strip()
-        source_db_port = (table_config.get("source_db_port") or "").strip()
 
         if not raw_target_file_name:
             raise ValueError("table_config.target_table(file_name) is empty")
@@ -577,16 +551,6 @@ with DAG(
 
         if not raw_target_file_dir:
             raise ValueError(f"{raw_target_file_name}: target_file_dir is empty")
-
-        if source_driver_type != "odbc":
-            raise ValueError(
-                f"{raw_target_file_name}: source_driver_type must be 'odbc'. current=[{source_driver_type}]"
-            )
-
-        if source_db_type != "oracle":
-            raise ValueError(
-                f"{raw_target_file_name}: source_db_type must be 'oracle'. current=[{source_db_type}]"
-            )
 
         if not source_conn_name:
             raise ValueError(
@@ -623,10 +587,6 @@ with DAG(
 
         print(f"[DEBUG] source_table={source_table}")
         print(f"[DEBUG] source_conn_name={source_conn_name}")
-        print(f"[DEBUG] source_driver_type={source_driver_type}")
-        print(f"[DEBUG] source_db_type={source_db_type}")
-        print(f"[DEBUG] source_db_host={source_db_host}")
-        print(f"[DEBUG] source_db_port={source_db_port}")
         print(f"[DEBUG] target_file_name={target_file_name}")
         print(f"[DEBUG] target_file_dir={target_file_dir}")
         print(f"[DEBUG] full_target_file_path={full_target_file_path}")
@@ -645,7 +605,6 @@ with DAG(
         job_succeeded = False
 
         try:
-            # 1) target file 생성 전 OS command 수행
             if target_pre_cmd:
                 completed = subprocess.run(
                     target_pre_cmd,
@@ -661,7 +620,6 @@ with DAG(
 
             source_conn = source_hook.get_conn()
 
-            # 2) 컬럼 메타 조회
             meta_cursor = source_conn.cursor()
             meta_sql = build_limit_0_sql_for_oracle(source_exec_sql)
             meta_cursor.execute(meta_sql)
@@ -704,7 +662,6 @@ with DAG(
                     f"target_columns={target_columns}"
                 )
 
-            # 3) 전체 데이터 조회
             source_cursor = source_conn.cursor()
             source_cursor.execute(source_exec_sql)
             rows = source_cursor.fetchall()
@@ -714,7 +671,6 @@ with DAG(
             print(f"[DEBUG] total_fetched_rows={len(rows)}")
             print(f"[DEBUG] sample_rows={rows[:5]}")
 
-            # 4) 파일 생성
             if target_file_type == "csv":
                 write_csv_file(
                     file_path=full_target_file_path,
@@ -746,7 +702,6 @@ with DAG(
                 f"encoding={normalized_target_file_encoding}"
             )
 
-            # 5) target file 생성 후 OS command 수행
             if target_post_cmd:
                 completed = subprocess.run(
                     target_post_cmd,

@@ -11,6 +11,7 @@ from airflow.providers.postgres.hooks.postgres import PostgresHook
 
 DAG_ID = "DYNAMIC_ORACLE_TO_ORACLE_ETL_META_2"
 
+
 # 메타 테이블 저장소
 META_POSTGRES_CONN_ID = "postgres_conn"
 
@@ -196,6 +197,20 @@ def build_limit_0_sql(source_exec_sql: str) -> str:
     """
 
 
+def build_create_stg_pk_sql(stg_table: str, pk_columns: list[str]) -> str | None:
+    if not pk_columns:
+        return None
+
+    pk_columns_sql = ", ".join(pk_columns)
+    pk_name = f"PK_{stg_table.upper()}"[:30]
+
+    return f"""
+        ALTER TABLE {stg_table}
+        ADD CONSTRAINT {pk_name}
+        PRIMARY KEY ({pk_columns_sql})
+    """
+
+
 def build_insert_sql(target_table: str, stg_table: str, target_columns: list[str]) -> str:
     insert_columns_sql = ", ".join(target_columns)
     select_columns_sql = ", ".join([f"s.{col}" for col in target_columns])
@@ -316,20 +331,6 @@ def build_stg_insert_sql(stg_table: str, target_columns: list[str]) -> str:
     """
 
 
-def build_create_stg_pk_sql(stg_table: str, pk_columns: list[str]) -> str | None:
-    if not pk_columns:
-        return None
-
-    pk_columns_sql = ", ".join(pk_columns)
-    pk_name = f"PK_{stg_table.upper()}"[:30]
-
-    return f"""
-        ALTER TABLE {stg_table}
-        ADD CONSTRAINT {pk_name}
-        PRIMARY KEY ({pk_columns_sql})
-    """
-
-
 def normalize_rows_for_odbc(rows: list[tuple], column_count: int) -> list[tuple]:
     normalized = []
 
@@ -362,6 +363,7 @@ with DAG(
         meta_hook = PostgresHook(postgres_conn_id=META_POSTGRES_CONN_ID)
 
         meta_hook.run("SET TIME ZONE 'Asia/Seoul'")
+
 
         update_input_param_sql = """
         UPDATE etl_meta_db_to_db a
