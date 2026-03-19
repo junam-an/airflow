@@ -264,10 +264,6 @@ with DAG(
             conn.autocommit = False
             cursor = conn.cursor()
 
-            # 0) 현재 DAG_ID 기준 전회차 p_end_tm ~ sysdate 값 기준 etl_param.tobe_param 인서트
-            cursor.execute(insert_etl_param_sql, (DAG_ID,))
-            conn.commit()
-
             # 1) 현재 DAG_ID 기준 최신 tobe_param 으로 etl_meta.input_param 업데이트
             cursor.execute(update_input_param_sql, (DAG_ID,))
 
