@@ -8,7 +8,7 @@ from datetime import datetime
 from pathlib import Path
 
 from airflow import DAG
-from airflow.decorators import task, get_current_context
+from airflow.decorators import task
 from airflow.providers.odbc.hooks.odbc import OdbcHook
 from airflow.providers.postgres.hooks.postgres import PostgresHook
 
@@ -706,8 +706,7 @@ with DAG(
         return configs
 
     @task(pool_slots=1)
-    def run_etl(table_config: dict):
-        context = get_current_context()
+    def run_etl(table_config: dict, **context):
         runtime_info = get_task_runtime_info(**context)
 
         source_table = (table_config.get("source_table") or "").strip()

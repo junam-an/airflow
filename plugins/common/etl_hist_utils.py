@@ -30,9 +30,9 @@ def get_task_runtime_info(**context) -> dict:
     task = context.get("task")
 
     return {
-        "run_id": context.get("run_id"),
-        "task_id": getattr(task, "task_id", None),
-        "map_index": getattr(ti, "map_index", None),
+        "run_id": context.get("run_id", ""),
+        "task_id": getattr(task, "task_id", "unknown_task"),
+        "map_index": getattr(ti, "map_index", -1),
     }
 
 
