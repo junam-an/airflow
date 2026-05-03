@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 from datetime import datetime
 from html import escape
+from urllib.parse import urlencode
 
 from flask import request, redirect
 from flask_appbuilder import BaseView, expose
@@ -16,8 +17,7 @@ META_SCHEMA = "public"
 
 REQUIRED_COLUMNS = {
     "dag_id",
-    "source_table",
-    "target_table",
+    "task_name",
 }
 
 SYSTEM_COLUMNS = {
@@ -202,6 +202,62 @@ class EtlMetaView(BaseView):
 
     def _get_selected_rows(self):
         return request.form.getlist("selected_rows")
+
+    def _convert_column_mapping_1_to_1(self, raw_value: str | None) -> str:
+        if raw_value is None:
+            return ""
+
+        raw_value = raw_value.strip()
+        if not raw_value:
+            return ""
+
+        result = {}
+        for col in raw_value.split(","):
+            col = col.strip()
+            if not col:
+                continue
+
+            upper_col = col.upper()
+            result[upper_col] = upper_col
+
+        if not result:
+            return ""
+
+        return json.dumps(result, ensure_ascii=False, separators=(",", ":"))
+
+    def _build_sort_header(self, meta_type, column_name, current_sort_column, current_sort_dir, search_column, search_text):
+        next_sort_dir = "ASC"
+        sort_mark = ""
+
+        if current_sort_column == column_name:
+            if current_sort_dir == "ASC":
+                next_sort_dir = "DESC"
+                sort_mark = " ▲"
+            else:
+                next_sort_dir = "ASC"
+                sort_mark = " ▼"
+
+        query_params = {
+            "meta_type": meta_type,
+            "sort_column": column_name,
+            "sort_dir": next_sort_dir,
+        }
+
+        if search_column:
+            query_params["search_column"] = search_column
+
+        if search_text:
+            query_params["search_text"] = search_text
+
+        query_string = urlencode(query_params)
+
+        return f'''
+        <th>
+            <a class="sort-link" href="/etl-meta/?{escape(query_string, quote=True)}">
+                {escape(column_name)}{escape(sort_mark)}
+            </a>
+        </th>
+        '''
 
     def _convert_value(self, value, data_type):
         if value is None:
@@ -492,6 +548,8 @@ class EtlMetaView(BaseView):
 
         search_column = request.args.get("search_column", "")
         search_text = request.args.get("search_text", "")
+        sort_column = request.args.get("sort_column", "")
+        sort_dir = request.args.get("sort_dir", "DESC").upper()
 
         hook = PostgresHook(postgres_conn_id=META_POSTGRES_CONN_ID)
 
@@ -500,6 +558,12 @@ class EtlMetaView(BaseView):
 
         if search_column not in column_names:
             search_column = ""
+
+        if sort_column not in column_names:
+            sort_column = ""
+
+        if sort_dir not in ("ASC", "DESC"):
+            sort_dir = "DESC"
 
         select_cols = ", ".join([f'"{c}"' for c in column_names])
         row_key_select_sql, _ = self._build_row_key_sql(column_names)
@@ -512,15 +576,19 @@ class EtlMetaView(BaseView):
 
         order_column = None
 
-        for candidate in ["created_at", "updated_at", "update_dt", "id", "dag_id", "source_table", "target_table"]:
-            if candidate in column_names:
-                order_column = candidate
-                break
-
-        if order_column:
-            order_sql = f'ORDER BY "{order_column}" DESC'
+        if sort_column:
+            order_column = sort_column
+            order_sql = f'ORDER BY "{order_column}" {sort_dir}'
         else:
-            order_sql = ""
+            for candidate in ["created_at", "updated_at", "update_dt", "id", "dag_id", "source_table", "target_table"]:
+                if candidate in column_names:
+                    order_column = candidate
+                    break
+
+            if order_column:
+                order_sql = f'ORDER BY "{order_column}" DESC'
+            else:
+                order_sql = ""
 
         rows = hook.get_records(
             f"""
@@ -557,7 +625,14 @@ class EtlMetaView(BaseView):
         """
 
         header_html += "".join(
-            f"<th>{escape(col)}</th>"
+            self._build_sort_header(
+                meta_type=meta_type,
+                column_name=col,
+                current_sort_column=sort_column,
+                current_sort_dir=sort_dir,
+                search_column=search_column,
+                search_text=search_text,
+            )
             for col in column_names
         )
 
@@ -893,6 +968,10 @@ class EtlMetaView(BaseView):
         insert_columns = self._get_insert_columns(table_name)
         form_values = {}
         error_message = ""
+        column_mapping_mode = request.form.get("column_mapping_mode", "CUSTOM").strip().upper()
+
+        if column_mapping_mode not in ("1:1", "CUSTOM"):
+            column_mapping_mode = "CUSTOM"
 
         if request.method == "POST":
             for col in insert_columns:
@@ -902,6 +981,11 @@ class EtlMetaView(BaseView):
             if not self._validate_required_values(form_values):
                 error_message = "필수 항목이 입력 되지 않았습니다."
             else:
+                if "column_mapping" in form_values and column_mapping_mode == "1:1":
+                    form_values["column_mapping"] = self._convert_column_mapping_1_to_1(
+                        form_values.get("column_mapping")
+                    )
+
                 hook = PostgresHook(postgres_conn_id=META_POSTGRES_CONN_ID)
 
                 col_names = []
@@ -945,10 +1029,24 @@ class EtlMetaView(BaseView):
             value = form_values.get(name, "")
 
             required_mark = '<span class="required">*</span>' if name in REQUIRED_COLUMNS else ""
-            required = "required" if name in REQUIRED_COLUMNS or nullable == "NO" else ""
+            required = "required" if name in REQUIRED_COLUMNS else ""
             comment = table_comments.get(name, "")
 
-            if data_type in ("json", "jsonb"):
+            if name == "column_mapping":
+                one_to_one_selected = "selected" if column_mapping_mode == "1:1" else ""
+                custom_selected = "selected" if column_mapping_mode == "CUSTOM" else ""
+
+                input_html = f"""
+                <div class="column-mapping-option-row">
+                    <select class="column-mapping-mode" name="column_mapping_mode">
+                        <option value="1:1" {one_to_one_selected}>1:1</option>
+                        <option value="CUSTOM" {custom_selected}>CUSTOM</option>
+                    </select>
+                    <span class="column-mapping-help">**custom 선택 시, {{"col1":"col1", ~~}} 형태로 입력</span>
+                </div>
+                <textarea name="{escape(name)}" rows="5" {required}>{escape(value)}</textarea>
+                """
+            elif data_type in ("json", "jsonb"):
                 input_html = f"""
                 <textarea name="{escape(name)}" rows="5" {required}>{escape(value)}</textarea>
                 """
