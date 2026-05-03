@@ -8,7 +8,7 @@ from flask import request, redirect
 from flask_appbuilder import BaseView, expose
 from airflow.plugins_manager import AirflowPlugin
 from airflow.providers.postgres.hooks.postgres import PostgresHook
-
+from flask_wtf.csrf import generate_csrf
 
 META_POSTGRES_CONN_ID = "postgres_conn"
 META_SCHEMA = "public"
@@ -634,6 +634,8 @@ class EtlMetaView(BaseView):
             </div>
             """
 
+        csrf_token = generate_csrf()
+
         html = f"""
         <html>
         <head>
@@ -755,6 +757,8 @@ class EtlMetaView(BaseView):
                 {error_html}
 
                 <form method="post" novalidate>
+                    <input type="hidden" name="csrf_token" value="{csrf_token}">
+
                     {form_html}
 
                     <button class="btn" type="submit">저장</button>
