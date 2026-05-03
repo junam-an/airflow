@@ -10,6 +10,7 @@ from airflow.plugins_manager import AirflowPlugin
 from airflow.providers.postgres.hooks.postgres import PostgresHook
 from flask_wtf.csrf import generate_csrf
 
+
 META_POSTGRES_CONN_ID = "postgres_conn"
 META_SCHEMA = "public"
 
@@ -17,6 +18,13 @@ REQUIRED_COLUMNS = {
     "dag_id",
     "source_table",
     "target_table",
+}
+
+SYSTEM_COLUMNS = {
+    "id",
+    "created_at",
+    "updated_at",
+    "update_dt",
 }
 
 COLUMN_COMMENTS = {
@@ -35,6 +43,7 @@ COLUMN_COMMENTS = {
         "config_option": "JSON 형식으로 매핑 정보 추가 소스,타겟 타입 등 설정 정보",
         "create_dt": "생성 일자",
         "disable_dt": "비활성화 일자",
+        "update_dt": "최종 수정 일자",
         "stg_drop_yn": "y 이면 임시테이블 드랍 n 이면 유지, y 여도 작업 에러시 무조건 남김",
         "enable_yn": "y 이면 데이터 처리 수행 n 이면 제외",
     },
@@ -57,6 +66,7 @@ COLUMN_COMMENTS = {
         "config_option": "JSON 형식으로 매핑 정보 추가 소스,타겟 타입 등 설정 정보",
         "create_dt": "생성 일자",
         "disable_dt": "비활성화 일자",
+        "update_dt": "최종 수정 일자",
         "stg_drop_yn": "y 이면 임시테이블 드랍 n 이면 유지, y 여도 작업 에러시 무조건 남김",
         "enable_yn": "y 이면 데이터 처리 수행 n 이면 제외",
     },
@@ -77,6 +87,7 @@ COLUMN_COMMENTS = {
         "config_option": "JSON 형식으로 매핑 정보 추가 소스,타겟 타입 등 설정 정보",
         "create_dt": "생성 일자",
         "disable_dt": "비활성화 일자",
+        "update_dt": "최종 수정 일자",
         "stg_drop_yn": "y 이면 임시테이블 드랍 n 이면 유지, y 여도 작업 에러시 무조건 남김",
         "enable_yn": "y 이면 데이터 처리 수행 n 이면 제외",
     },
@@ -146,27 +157,51 @@ class EtlMetaView(BaseView):
     def _get_insert_columns(self, table_name):
         columns = self._get_columns(table_name)
 
-        skip_columns = {
-            "id",
-            "created_at",
-            "updated_at",
-        }
-
         insert_columns = []
 
         for col in columns:
             name = col["name"]
             default = col["column_default"]
 
-            if name in skip_columns:
+            if name in SYSTEM_COLUMNS:
                 continue
 
-            if default and "nextval" in default:
+            if default and "nextval" in str(default).lower():
                 continue
 
             insert_columns.append(col)
 
         return insert_columns
+
+    def _get_editable_columns(self, columns):
+        editable_columns = []
+
+        for col in columns:
+            name = col["name"]
+            default = col["column_default"]
+
+            if name in SYSTEM_COLUMNS:
+                continue
+
+            if default and "nextval" in str(default).lower():
+                continue
+
+            editable_columns.append(col)
+
+        return editable_columns
+
+    def _build_row_key_sql(self, column_names):
+        """
+        화면 ROW 식별용 key.
+        id 컬럼이 있으면 id 기준, 없으면 PostgreSQL ctid 기준.
+        """
+        if "id" in column_names:
+            return '"id"::text AS __row_key', '"id"::text'
+
+        return "ctid::text AS __row_key", "ctid::text"
+
+    def _get_selected_rows(self):
+        return request.form.getlist("selected_rows")
 
     def _convert_value(self, value, data_type):
         if value is None:
@@ -305,6 +340,151 @@ class EtlMetaView(BaseView):
 
         return True
 
+    @expose("/delete", methods=["POST"])
+    def delete(self):
+        meta_type = self._get_meta_type()
+        table_name = self._get_table_name(meta_type)
+
+        selected_rows = self._get_selected_rows()
+
+        if not selected_rows:
+            return redirect(f"/etl-meta/?meta_type={meta_type}")
+
+        columns = self._get_columns(table_name)
+        column_names = [c["name"] for c in columns]
+        _, row_key_where_sql = self._build_row_key_sql(column_names)
+
+        placeholders = ", ".join(["%s"] * len(selected_rows))
+
+        delete_sql = f"""
+        DELETE FROM {META_SCHEMA}.{table_name}
+        WHERE {row_key_where_sql} IN ({placeholders})
+        """
+
+        hook = PostgresHook(postgres_conn_id=META_POSTGRES_CONN_ID)
+        hook.run(delete_sql, parameters=tuple(selected_rows))
+
+        return redirect(f"/etl-meta/?meta_type={meta_type}")
+
+    @expose("/disable", methods=["POST"])
+    def disable(self):
+        meta_type = self._get_meta_type()
+        table_name = self._get_table_name(meta_type)
+
+        selected_rows = self._get_selected_rows()
+
+        if not selected_rows:
+            return redirect(f"/etl-meta/?meta_type={meta_type}")
+
+        columns = self._get_columns(table_name)
+        column_names = [c["name"] for c in columns]
+
+        if "enable_yn" not in column_names:
+            raise Exception(f"{META_SCHEMA}.{table_name}: enable_yn column does not exist")
+
+        _, row_key_where_sql = self._build_row_key_sql(column_names)
+
+        set_sql_list = ['"enable_yn" = \'N\'']
+
+        if "disable_dt" in column_names:
+            set_sql_list.append('"disable_dt" = TO_CHAR(NOW(), \'YYYYMMDD\')')
+
+        if "update_dt" in column_names:
+            set_sql_list.append('"update_dt" = TO_CHAR(NOW(), \'YYYYMMDD\')')
+
+        set_sql = ", ".join(set_sql_list)
+        placeholders = ", ".join(["%s"] * len(selected_rows))
+
+        update_sql = f"""
+        UPDATE {META_SCHEMA}.{table_name}
+           SET {set_sql}
+         WHERE {row_key_where_sql} IN ({placeholders})
+        """
+
+        hook = PostgresHook(postgres_conn_id=META_POSTGRES_CONN_ID)
+        hook.run(update_sql, parameters=tuple(selected_rows))
+
+        return redirect(f"/etl-meta/?meta_type={meta_type}")
+
+    @expose("/save", methods=["POST"])
+    def save(self):
+        meta_type = self._get_meta_type()
+        table_name = self._get_table_name(meta_type)
+
+        columns = self._get_columns(table_name)
+        column_names = [c["name"] for c in columns]
+        editable_columns = self._get_editable_columns(columns)
+        _, row_key_where_sql = self._build_row_key_sql(column_names)
+
+        row_keys = request.form.getlist("row_keys")
+
+        if not row_keys:
+            return redirect(f"/etl-meta/?meta_type={meta_type}")
+
+        hook = PostgresHook(postgres_conn_id=META_POSTGRES_CONN_ID)
+
+        conn = None
+        cursor = None
+
+        try:
+            conn = hook.get_conn()
+            conn.autocommit = False
+            cursor = conn.cursor()
+
+            for row_idx, row_key in enumerate(row_keys):
+                row_changed = request.form.get(f"row_changed_{row_idx}", "N")
+
+                if row_changed != "Y":
+                    continue
+
+                set_cols = []
+                values = []
+
+                for col in editable_columns:
+                    col_name = col["name"]
+                    data_type = col["data_type"]
+                    form_key = f"cell_{row_idx}_{col_name}"
+
+                    if form_key not in request.form:
+                        continue
+
+                    raw_value = request.form.get(form_key)
+                    converted_value = self._convert_value(raw_value, data_type)
+
+                    set_cols.append(f'"{col_name}" = %s')
+                    values.append(converted_value)
+
+                if "update_dt" in column_names:
+                    set_cols.append('"update_dt" = TO_CHAR(NOW(), \'YYYYMMDD\')')
+
+                if not set_cols:
+                    continue
+
+                values.append(row_key)
+
+                update_sql = f"""
+                UPDATE {META_SCHEMA}.{table_name}
+                   SET {", ".join(set_cols)}
+                 WHERE {row_key_where_sql} = %s
+                """
+
+                cursor.execute(update_sql, tuple(values))
+
+            conn.commit()
+
+        except Exception:
+            if conn is not None:
+                conn.rollback()
+            raise
+
+        finally:
+            if cursor is not None:
+                cursor.close()
+            if conn is not None:
+                conn.close()
+
+        return redirect(f"/etl-meta/?meta_type={meta_type}")
+
     @expose("/")
     def list(self):
         meta_type = self._get_meta_type()
@@ -322,6 +502,7 @@ class EtlMetaView(BaseView):
             search_column = ""
 
         select_cols = ", ".join([f'"{c}"' for c in column_names])
+        row_key_select_sql, _ = self._build_row_key_sql(column_names)
 
         where_sql, search_params = self._build_search_sql(
             column_names=column_names,
@@ -331,7 +512,7 @@ class EtlMetaView(BaseView):
 
         order_column = None
 
-        for candidate in ["created_at", "updated_at", "id", "dag_id", "source_table", "target_table"]:
+        for candidate in ["created_at", "updated_at", "update_dt", "id", "dag_id", "source_table", "target_table"]:
             if candidate in column_names:
                 order_column = candidate
                 break
@@ -343,7 +524,9 @@ class EtlMetaView(BaseView):
 
         rows = hook.get_records(
             f"""
-            SELECT {select_cols}
+            SELECT
+                {row_key_select_sql},
+                {select_cols}
             FROM {META_SCHEMA}.{table_name}
             {where_sql}
             {order_sql}
@@ -362,18 +545,66 @@ class EtlMetaView(BaseView):
             search_text=search_text,
         )
 
-        header_html = "".join(
+        editable_column_names = {
+            col["name"]
+            for col in self._get_editable_columns(columns)
+        }
+
+        header_html = """
+        <th style="width: 40px; text-align: center;">
+            <input type="checkbox" onclick="toggleAllRows(this)">
+        </th>
+        """
+
+        header_html += "".join(
             f"<th>{escape(col)}</th>"
             for col in column_names
         )
 
         row_html = ""
 
-        for row in rows:
+        for row_idx, row in enumerate(rows):
+            row_key = row[0]
+            row_values = row[1:]
+
             row_html += "<tr>"
-            for value in row:
-                row_html += f"<td>{escape(str(value)) if value is not None else ''}</td>"
+            row_html += f"""
+            <td style="text-align: center;">
+                <input type="checkbox" name="selected_rows" value="{escape(str(row_key))}">
+                <input type="hidden" name="row_keys" value="{escape(str(row_key))}">
+                <input type="hidden" name="row_changed_{row_idx}" id="row_changed_{row_idx}" value="N">
+            </td>
+            """
+
+            for col_idx, value in enumerate(row_values):
+                col_name = column_names[col_idx]
+                value_text = "" if value is None else str(value)
+                value_attr = escape(value_text, quote=True)
+
+                if col_name in editable_column_names:
+                    row_html += f"""
+                    <td class="editable-cell" ondblclick="startEdit(this)">
+                        <span class="cell-view">{escape(value_text)}</span>
+                        <input
+                            class="cell-input"
+                            type="text"
+                            name="cell_{row_idx}_{escape(col_name, quote=True)}"
+                            value="{value_attr}"
+                            data-original="{value_attr}"
+                            data-row-index="{row_idx}"
+                            onblur="finishEdit(this)"
+                            onkeydown="handleCellKeydown(event, this)"
+                        >
+                    </td>
+                    """
+                else:
+                    row_html += f"""
+                    <td>{escape(value_text)}</td>
+                    """
+
             row_html += "</tr>"
+
+        csrf_token = generate_csrf()
 
         html = f"""
         <html>
@@ -419,6 +650,15 @@ class EtlMetaView(BaseView):
 
                 .btn.gray {{
                     background-color: #666;
+                }}
+
+                .btn.warning {{
+                    background-color: #faad14;
+                    color: #111;
+                }}
+
+                .btn.danger {{
+                    background-color: #d9363e;
                 }}
 
                 .search-box {{
@@ -469,6 +709,16 @@ class EtlMetaView(BaseView):
                     font-size: 12px;
                 }}
 
+                .table-actions {{
+                    margin-bottom: 10px;
+                }}
+
+                .edit-help {{
+                    margin-bottom: 10px;
+                    color: #888;
+                    font-size: 12px;
+                }}
+
                 table {{
                     border-collapse: collapse;
                     width: 100%;
@@ -484,6 +734,30 @@ class EtlMetaView(BaseView):
                 th {{
                     background-color: #f5f5f5;
                     color: #222;
+                }}
+
+                .editable-cell {{
+                    cursor: pointer;
+                }}
+
+                .editable-cell:hover {{
+                    background-color: #fffbe6;
+                }}
+
+                .cell-input {{
+                    display: none;
+                    width: 100%;
+                    min-width: 120px;
+                    padding: 5px;
+                    border: 1px solid #017cee;
+                    border-radius: 3px;
+                    font-size: 13px;
+                }}
+
+                .cell-view {{
+                    display: inline-block;
+                    min-width: 20px;
+                    white-space: pre-wrap;
                 }}
             </style>
         </head>
@@ -507,15 +781,104 @@ class EtlMetaView(BaseView):
 
                 <h3>최근 등록된 설정</h3>
 
-                <table>
-                    <thead>
-                        <tr>{header_html}</tr>
-                    </thead>
-                    <tbody>
-                        {row_html}
-                    </tbody>
-                </table>
+                <form method="post" id="metaTableForm">
+                    <input type="hidden" name="csrf_token" value="{csrf_token}">
+
+                    <div class="table-actions">
+                        <button
+                            class="btn"
+                            type="submit"
+                            formaction="/etl-meta/save?meta_type={escape(meta_type)}"
+                            onclick="return confirm('변경한 내용을 저장하시겠습니까?');"
+                        >
+                            저장
+                        </button>
+
+                        <button
+                            class="btn warning"
+                            type="submit"
+                            formaction="/etl-meta/disable?meta_type={escape(meta_type)}"
+                            onclick="return confirm('선택한 ROW를 비활성화 하시겠습니까?');"
+                        >
+                            선택 ROW 비활성화
+                        </button>
+
+                        <button
+                            class="btn danger"
+                            type="submit"
+                            formaction="/etl-meta/delete?meta_type={escape(meta_type)}"
+                            onclick="return confirm('선택한 ROW를 삭제하시겠습니까? 삭제 후 복구할 수 없습니다.');"
+                        >
+                            선택 ROW 삭제
+                        </button>
+                    </div>
+
+                    <div class="edit-help">
+                        컬럼 값을 더블 클릭하면 수정할 수 있습니다. 수정 후 저장 버튼을 누르면 변경됩니다.
+                    </div>
+
+                    <table>
+                        <thead>
+                            <tr>{header_html}</tr>
+                        </thead>
+                        <tbody>
+                            {row_html}
+                        </tbody>
+                    </table>
+                </form>
             </div>
+
+            <script>
+            function toggleAllRows(source) {{
+                const checkboxes = document.getElementsByName("selected_rows");
+                for (let i = 0; i < checkboxes.length; i++) {{
+                    checkboxes[i].checked = source.checked;
+                }}
+            }}
+
+            function startEdit(td) {{
+                const view = td.querySelector(".cell-view");
+                const input = td.querySelector(".cell-input");
+
+                if (!view || !input) {{
+                    return;
+                }}
+
+                view.style.display = "none";
+                input.style.display = "block";
+                input.focus();
+                input.select();
+            }}
+
+            function finishEdit(input) {{
+                const td = input.closest("td");
+                const view = td.querySelector(".cell-view");
+                const rowIndex = input.dataset.rowIndex;
+                const changedInput = document.getElementById("row_changed_" + rowIndex);
+
+                view.textContent = input.value;
+                view.style.display = "inline-block";
+                input.style.display = "none";
+
+                if (input.value !== input.dataset.original && changedInput) {{
+                    changedInput.value = "Y";
+                    td.classList.add("edited-cell");
+                }}
+            }}
+
+            function handleCellKeydown(event, input) {{
+                if (event.key === "Enter") {{
+                    event.preventDefault();
+                    finishEdit(input);
+                }}
+
+                if (event.key === "Escape") {{
+                    event.preventDefault();
+                    input.value = input.dataset.original;
+                    finishEdit(input);
+                }}
+            }}
+            </script>
         </body>
         </html>
         """
