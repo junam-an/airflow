@@ -831,4 +831,6 @@ with DAG(
 
     @task(task_id="finish_etl")
     def finish_etl():
-    print("finish")
+        print("finish")
+
+    finish_task = finish_etl()
