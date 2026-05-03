@@ -381,6 +381,8 @@ class EtlMetaView(BaseView):
         return """
         <div class="top-buttons">
             <a class="btn gray" href="/home">Airflow 콘솔로 돌아가기</a>
+            <a class="btn gray" href="/etl-meta/">ETL Meta 관리</a>
+            <a class="btn" href="/etl-meta/flow">ETL Flow 보기</a>
         </div>
         """
 
@@ -487,6 +489,398 @@ class EtlMetaView(BaseView):
                 return False
 
         return True
+
+    def _short_text(self, value, max_len: int = 80) -> str:
+        if value is None:
+            return "-"
+
+        text = str(value).strip()
+        if not text:
+            return "-"
+
+        text = " ".join(text.split())
+
+        if len(text) > max_len:
+            return text[:max_len] + "..."
+
+        return text
+
+    def _mermaid_escape(self, value) -> str:
+        text = self._short_text(value)
+        return (
+            text.replace("\\", "\\\\")
+            .replace('"', "'")
+            .replace("[", "(")
+            .replace("]", ")")
+            .replace("{", "(")
+            .replace("}", ")")
+            .replace("|", "/")
+            .replace("<", "&lt;")
+            .replace(">", "&gt;")
+        )
+
+    def _get_dag_ids(self, table_name: str) -> list[str]:
+        columns = self._get_columns(table_name)
+        column_names = [c["name"] for c in columns]
+
+        if "dag_id" not in column_names:
+            return []
+
+        hook = PostgresHook(postgres_conn_id=META_POSTGRES_CONN_ID)
+        rows = hook.get_records(
+            f'''
+            SELECT DISTINCT dag_id
+            FROM {META_SCHEMA}.{table_name}
+            WHERE dag_id IS NOT NULL
+              AND TRIM(dag_id) <> ''
+            ORDER BY dag_id
+            '''
+        )
+
+        return [str(r[0]) for r in rows if r and r[0] is not None]
+
+    def _get_flow_rows(self, table_name: str, dag_id: str) -> list[dict]:
+        columns = self._get_columns(table_name)
+        column_names = [c["name"] for c in columns]
+        column_set = set(column_names)
+
+        flow_columns = [
+            "task_name",
+            "exec_seq",
+            "source_table",
+            "target_table",
+            "load_option",
+            "enable_yn",
+            "target_pre_sql",
+            "target_post_sql",
+            "target_pre_cmd",
+            "target_post_cmd",
+            "source_pre_cmd",
+        ]
+
+        select_items = []
+        for col in flow_columns:
+            if col in column_set:
+                select_items.append(f'"{col}"')
+            else:
+                select_items.append(f"NULL AS {col}")
+
+        if "dag_id" not in column_set:
+            return []
+
+        order_items = []
+        if "exec_seq" in column_set:
+            order_items.append("COALESCE(exec_seq, 999999)")
+        if "task_name" in column_set:
+            order_items.append("task_name")
+        if "source_table" in column_set:
+            order_items.append("source_table")
+        if "target_table" in column_set:
+            order_items.append("target_table")
+
+        order_sql = "ORDER BY " + ", ".join(order_items) if order_items else ""
+
+        hook = PostgresHook(postgres_conn_id=META_POSTGRES_CONN_ID)
+        records = hook.get_records(
+            f'''
+            SELECT {", ".join(select_items)}
+            FROM {META_SCHEMA}.{table_name}
+            WHERE dag_id = %s
+            {order_sql}
+            ''',
+            parameters=(dag_id,),
+        )
+
+        rows = []
+        for record in records:
+            rows.append(dict(zip(flow_columns, record)))
+
+        return rows
+
+    def _build_flow_type_buttons(self, selected_meta_type: str, selected_dag_id: str | None = None) -> str:
+        html = ""
+
+        for meta_type, info in META_TABLES.items():
+            active_class = "active" if meta_type == selected_meta_type else ""
+            query_params = {"meta_type": meta_type}
+            if selected_dag_id and meta_type == selected_meta_type:
+                query_params["dag_id"] = selected_dag_id
+
+            html += f'''
+            <a class="tab {active_class}" href="/etl-meta/flow?{escape(urlencode(query_params), quote=True)}">
+                {escape(info["label"])}
+            </a>
+            '''
+
+        return html
+
+    def _build_flow_dag_select(self, meta_type: str, dag_ids: list[str], selected_dag_id: str) -> str:
+        option_html = ""
+
+        for dag_id in dag_ids:
+            selected = "selected" if dag_id == selected_dag_id else ""
+            option_html += f'''
+            <option value="{escape(dag_id, quote=True)}" {selected}>{escape(dag_id)}</option>
+            '''
+
+        return f'''
+        <form class="search-box" method="get" action="/etl-meta/flow">
+            <input type="hidden" name="meta_type" value="{escape(meta_type, quote=True)}">
+            <div class="search-row">
+                <div class="search-keyword">
+                    <label>dag_id</label>
+                    <select name="dag_id">
+                        {option_html}
+                    </select>
+                </div>
+                <div class="search-button">
+                    <label>&nbsp;</label>
+                    <button class="btn" type="submit">FLOW 조회</button>
+                </div>
+            </div>
+        </form>
+        '''
+
+    def _build_mermaid_flow(self, flow_rows: list[dict]) -> str:
+        if not flow_rows:
+            return 'flowchart LR\n    EMPTY["조회된 TASK가 없습니다"]'
+
+        lines = ["flowchart LR"]
+        lines.append("    classDef active fill:#e8f4ff,stroke:#017cee,stroke-width:1px,color:#111;")
+        lines.append("    classDef disabled fill:#eeeeee,stroke:#999,stroke-width:1px,color:#777;")
+
+        for idx, row in enumerate(flow_rows):
+            node_id = f"T{idx}"
+            enable_yn = self._short_text(row.get("enable_yn"), 10).upper()
+            node_class = "disabled" if enable_yn == "N" else "active"
+
+            label_items = [
+                ("task_name", row.get("task_name")),
+                ("exec_seq", row.get("exec_seq")),
+                ("source_table", row.get("source_table")),
+                ("target_table", row.get("target_table")),
+                ("load_option", row.get("load_option")),
+                ("enable_yn", row.get("enable_yn")),
+                ("target_pre_sql", row.get("target_pre_sql")),
+                ("target_post_sql", row.get("target_post_sql")),
+                ("target_pre_cmd", row.get("target_pre_cmd")),
+                ("target_post_cmd", row.get("target_post_cmd")),
+                ("source_pre_cmd", row.get("source_pre_cmd")),
+            ]
+
+            label = "<br/>".join(
+                [f"{escape(k)}: {self._mermaid_escape(v)}" for k, v in label_items]
+            )
+
+            lines.append(f'    {node_id}["{label}"]:::{node_class}')
+
+        for idx in range(len(flow_rows) - 1):
+            lines.append(f"    T{idx} --> T{idx + 1}")
+
+        return "\n".join(lines)
+
+    @expose("/flow", methods=["GET"])
+    def flow(self):
+        meta_type = self._get_meta_type()
+        table_name = self._get_table_name(meta_type)
+        selected_dag_id = request.args.get("dag_id", "").strip()
+
+        dag_ids = self._get_dag_ids(table_name)
+
+        if not selected_dag_id and dag_ids:
+            selected_dag_id = dag_ids[0]
+
+        if selected_dag_id and selected_dag_id not in dag_ids:
+            selected_dag_id = dag_ids[0] if dag_ids else ""
+
+        flow_rows = self._get_flow_rows(table_name, selected_dag_id) if selected_dag_id else []
+        mermaid_text = self._build_mermaid_flow(flow_rows)
+
+        top_buttons_html = self._render_top_buttons()
+        flow_type_buttons_html = self._build_flow_type_buttons(meta_type, selected_dag_id)
+        dag_select_html = self._build_flow_dag_select(meta_type, dag_ids, selected_dag_id) if dag_ids else ""
+
+        no_dag_message = ""
+        if not dag_ids:
+            no_dag_message = f'''
+            <div class="error-message">
+                {escape(META_SCHEMA)}.{escape(table_name)} 테이블에 조회 가능한 dag_id가 없습니다.
+            </div>
+            '''
+
+        html = f'''
+        <html>
+        <head>
+            <style>
+                .page {{
+                    padding: 20px;
+                }}
+
+                .top-buttons {{
+                    margin-bottom: 15px;
+                }}
+
+                .tabs {{
+                    margin-bottom: 20px;
+                }}
+
+                .tab {{
+                    display: inline-block;
+                    padding: 9px 14px;
+                    margin-right: 6px;
+                    background-color: #333;
+                    color: white;
+                    text-decoration: none;
+                    border-radius: 4px;
+                }}
+
+                .tab.active {{
+                    background-color: #017cee;
+                }}
+
+                .btn {{
+                    display: inline-block;
+                    padding: 8px 14px;
+                    background-color: #017cee;
+                    color: white;
+                    text-decoration: none;
+                    border-radius: 4px;
+                    margin-bottom: 15px;
+                    border: none;
+                    cursor: pointer;
+                }}
+
+                .btn.gray {{
+                    background-color: #666;
+                }}
+
+                .search-box {{
+                    padding: 15px;
+                    margin-bottom: 20px;
+                    border: 1px solid #333;
+                    border-radius: 6px;
+                    background-color: #111;
+                }}
+
+                .search-row {{
+                    display: flex;
+                    gap: 12px;
+                    align-items: end;
+                }}
+
+                .search-keyword {{
+                    width: 420px;
+                }}
+
+                .search-button {{
+                    min-width: 180px;
+                }}
+
+                .search-box label {{
+                    display: block;
+                    margin-bottom: 5px;
+                    font-weight: bold;
+                    color: white;
+                }}
+
+                .search-box select {{
+                    width: 100%;
+                    padding: 8px;
+                    border: 1px solid #555;
+                    border-radius: 4px;
+                    background-color: #222;
+                    color: white;
+                }}
+
+                .flow-panel {{
+                    padding: 16px;
+                    border: 1px solid #ddd;
+                    border-radius: 8px;
+                    background-color: white;
+                    overflow-x: auto;
+                }}
+
+                .flow-help {{
+                    margin-bottom: 10px;
+                    color: #666;
+                    font-size: 12px;
+                }}
+
+                .mermaid {{
+                    min-width: 900px;
+                }}
+
+                .error-message {{
+                    margin-bottom: 15px;
+                    padding: 12px 14px;
+                    background-color: #ffe8e8;
+                    border: 1px solid #ff9f9f;
+                    color: #b00020;
+                    border-radius: 4px;
+                    font-weight: bold;
+                }}
+
+                pre.flow-source {{
+                    margin-top: 16px;
+                    padding: 12px;
+                    background-color: #f7f7f7;
+                    border: 1px solid #ddd;
+                    border-radius: 6px;
+                    white-space: pre-wrap;
+                    font-size: 12px;
+                }}
+            </style>
+            <script src="https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.min.js"></script>
+            <script>
+                if (window.mermaid) {{
+                    mermaid.initialize({{
+                        startOnLoad: true,
+                        securityLevel: 'loose',
+                        theme: 'default',
+                        flowchart: {{
+                            htmlLabels: true,
+                            curve: 'basis'
+                        }}
+                    }});
+                }}
+            </script>
+        </head>
+        <body>
+            <div class="page">
+                {top_buttons_html}
+
+                <h2>ETL Flow</h2>
+
+                <div class="tabs">
+                    {flow_type_buttons_html}
+                </div>
+
+                <h3>{escape(META_SCHEMA)}.{escape(table_name)}</h3>
+
+                {dag_select_html}
+                {no_dag_message}
+
+                <div class="flow-help">
+                    선택한 FLOW 유형과 dag_id 기준으로 exec_seq 오름차순 순차 FLOW를 표시합니다.
+                    enable_yn = N 인 TASK는 회색으로 표시됩니다.
+                </div>
+
+                <div class="flow-panel">
+                    <div class="mermaid">
+{escape(mermaid_text)}
+                    </div>
+                </div>
+
+                <details>
+                    <summary>Mermaid source 보기</summary>
+                    <pre class="flow-source">{escape(mermaid_text)}</pre>
+                </details>
+            </div>
+        </body>
+        </html>
+        '''
+
+        return html
 
     @expose("/delete", methods=["POST"])
     def delete(self):
@@ -925,6 +1319,9 @@ class EtlMetaView(BaseView):
 
                 <a class="btn" href="/etl-meta/new?meta_type={escape(meta_type)}">
                     신규 DAG 설정 등록
+                </a>
+                <a class="btn gray" href="/etl-meta/flow?meta_type={escape(meta_type)}">
+                    FLOW 보기
                 </a>
 
                 <h3>최근 등록된 설정</h3>
