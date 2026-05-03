@@ -13,6 +13,75 @@ from airflow.providers.postgres.hooks.postgres import PostgresHook
 META_POSTGRES_CONN_ID = "postgres_conn"
 META_SCHEMA = "public"
 
+REQUIRED_COLUMNS = {
+    "dag_id",
+    "source_table",
+    "target_table",
+}
+
+COLUMN_COMMENTS = {
+    "etl_meta_db_to_db": {
+        "job_type": "dag 스케쥴 타입 입력 : daily, weekly, monthly, hourly, minute",
+        "dag_id": "dag 이름 입력",
+        "load_option": "ui : upsert, di: delete/insert, ti: truncate/insert, u: update only, i: insert only, d: delete only",
+        "source_table": "소스 테이블 명 입력",
+        "target_table": "타겟 테이블 명 입력",
+        "pk_column": "타겟 pk 컬럼명 col1,col2.. 기술",
+        "source_exec_sql": "source 추출 쿼리",
+        "column_mapping": "일반 컬럼명 col1,col2.. 기술",
+        "target_pre_sql": "STG 테이블 적재 완료 후 수행, 타겟 STG -> 본 테이블 적재 전 수행 sql, pre,post,본테이블 적재 에러 발생시 전부 rollback",
+        "target_post_sql": "본 테이블 적재 완료 후 수행, 타겟 STG -> 본 테이블 적재 후 수행 sql, pre,post,본테이블 적재 에러 발생시 전부 rollback",
+        "input_param": "JSON 형식으로 사용할 파라미터 기술, 입력한 파라미터 값 source_exec_sql 내부에 존재시 치환",
+        "config_option": "JSON 형식으로 매핑 정보 추가 소스,타겟 타입 등 설정 정보",
+        "create_dt": "생성 일자",
+        "disable_dt": "비활성화 일자",
+        "stg_drop_yn": "y 이면 임시테이블 드랍 n 이면 유지, y 여도 작업 에러시 무조건 남김",
+        "enable_yn": "y 이면 데이터 처리 수행 n 이면 제외",
+    },
+    "etl_meta_file_to_db": {
+        "job_type": "dag 스케쥴 타입 입력 : daily, weekly, monthly, hourly, minute",
+        "dag_id": "dag 이름 입력",
+        "load_option": "ui : upsert, di: delete/insert, ti: truncate/insert, u: update only, i: insert only, d: delete only",
+        "source_table": "소스 파일 명 입력 : customer_$$p_base_dt_*.csv, customer_$$p_base_dt.csv",
+        "target_table": "타겟 테이블 명 입력",
+        "pk_column": "타겟 pk 컬럼명 col1,col2.. 기술",
+        "column_mapping": "일반 컬럼명 col1,col2.. 기술",
+        "source_file_type": "소스 파일 유형, json: 대괄호 중괄호 둘다 가능, csv: 파일에 헤더 포함 및 딜리미터 필요, text: 1 column",
+        "csv_file_delimiter": "csv 파일 전용 딜리미터 지정 : , | \\t tab",
+        "source_file_encoding": "소스 파일 인코딩 utf-8, euc-kr, cp949, ms949 입력",
+        "source_file_dir": "소스 파일 경로",
+        "source_pre_cmd": "소스 파일 읽기 전 전처리 로직 수행",
+        "target_pre_sql": "STG 테이블 적재 완료 후 수행, 타겟 STG -> 본 테이블 적재 전 수행 sql, pre,post,본테이블 적재 에러 발생시 전부 rollback",
+        "target_post_sql": "본 테이블 적재 완료 후 수행, 타겟 STG -> 본 테이블 적재 후 수행 sql, pre,post,본테이블 적재 에러 발생시 전부 rollback",
+        "input_param": "JSON 형식으로 사용할 파라미터 기술, 입력한 파라미터 값 source_exec_sql 내부에 존재시 치환",
+        "config_option": "JSON 형식으로 매핑 정보 추가 소스,타겟 타입 등 설정 정보",
+        "create_dt": "생성 일자",
+        "disable_dt": "비활성화 일자",
+        "stg_drop_yn": "y 이면 임시테이블 드랍 n 이면 유지, y 여도 작업 에러시 무조건 남김",
+        "enable_yn": "y 이면 데이터 처리 수행 n 이면 제외",
+    },
+    "etl_meta_db_to_file": {
+        "job_type": "dag 스케쥴 타입 입력 : daily, weekly, monthly, hourly, minute",
+        "dag_id": "dag 이름 입력",
+        "source_table": "소스 테이블 명 입력",
+        "target_table": "타겟 테이블 명 입력",
+        "source_exec_sql": "source 추출 쿼리",
+        "column_mapping": "일반 컬럼명 col1,col2.. 기술",
+        "target_file_type": "타겟 파일 유형, json: 대괄호 중괄호 둘다 가능, csv: 파일에 헤더 포함 및 딜리미터 필요, text: 1 column",
+        "csv_file_delimiter": "csv 파일 전용 딜리미터 지정 : , | \\t tab",
+        "target_file_encoding": "타겟 파일 인코딩 utf-8, euc-kr, cp949, ms949 입력",
+        "target_file_dir": "타겟 파일 경로",
+        "target_pre_cmd": "타겟 파일 생성 전 전처리 로직 수행",
+        "target_post_cmd": "타겟 파일 생성 후 후처리 로직 수행",
+        "input_param": "JSON 형식으로 사용할 파라미터 기술, 입력한 파라미터 값 source_exec_sql 내부에 존재시 치환",
+        "config_option": "JSON 형식으로 매핑 정보 추가 소스,타겟 타입 등 설정 정보",
+        "create_dt": "생성 일자",
+        "disable_dt": "비활성화 일자",
+        "stg_drop_yn": "y 이면 임시테이블 드랍 n 이면 유지, y 여도 작업 에러시 무조건 남김",
+        "enable_yn": "y 이면 데이터 처리 수행 n 이면 제외",
+    },
+}
+
 META_TABLES = {
     "db_to_db": {
         "label": "DB → DB",
@@ -125,6 +194,13 @@ class EtlMetaView(BaseView):
 
         return value
 
+    def _render_top_buttons(self):
+        return """
+        <div class="top-buttons">
+            <a class="btn gray" href="/home">Airflow 콘솔로 돌아가기</a>
+        </div>
+        """
+
     def _render_tabs(self, selected_meta_type):
         html = ""
 
@@ -208,12 +284,10 @@ class EtlMetaView(BaseView):
         if not keyword:
             return "", []
 
-        # 특정 항목 선택 시
         if search_column and search_column in column_names:
             where_sql = f'WHERE "{search_column}"::text {operator} %s'
             return where_sql, [value]
 
-        # 전체 항목 검색 시
         conditions = []
 
         for col in column_names:
@@ -223,6 +297,13 @@ class EtlMetaView(BaseView):
         params = [value] * len(column_names)
 
         return where_sql, params
+
+    def _validate_required_values(self, form_values):
+        for required_col in REQUIRED_COLUMNS:
+            if not form_values.get(required_col, "").strip():
+                return False
+
+        return True
 
     @expose("/")
     def list(self):
@@ -272,6 +353,7 @@ class EtlMetaView(BaseView):
         )
 
         tabs_html = self._render_tabs(meta_type)
+        top_buttons_html = self._render_top_buttons()
 
         search_area_html = self._build_search_area(
             meta_type=meta_type,
@@ -299,6 +381,10 @@ class EtlMetaView(BaseView):
             <style>
                 .page {{
                     padding: 20px;
+                }}
+
+                .top-buttons {{
+                    margin-bottom: 15px;
                 }}
 
                 .tabs {{
@@ -403,6 +489,8 @@ class EtlMetaView(BaseView):
         </head>
         <body>
             <div class="page">
+                {top_buttons_html}
+
                 <h2>ETL Meta 관리</h2>
 
                 <div class="tabs">
@@ -440,77 +528,111 @@ class EtlMetaView(BaseView):
         table_name = self._get_table_name(meta_type)
 
         insert_columns = self._get_insert_columns(table_name)
+        form_values = {}
+        error_message = ""
 
         if request.method == "POST":
-            hook = PostgresHook(postgres_conn_id=META_POSTGRES_CONN_ID)
-
-            col_names = []
-            values = []
-
             for col in insert_columns:
                 name = col["name"]
-                data_type = col["data_type"]
+                form_values[name] = request.form.get(name, "")
 
-                raw_value = request.form.get(name)
-                converted_value = self._convert_value(raw_value, data_type)
+            if not self._validate_required_values(form_values):
+                error_message = "필수 항목이 입력 되지 않았습니다."
+            else:
+                hook = PostgresHook(postgres_conn_id=META_POSTGRES_CONN_ID)
 
-                if converted_value is not None:
-                    col_names.append(name)
-                    values.append(converted_value)
+                col_names = []
+                values = []
 
-            if not col_names:
-                raise Exception("No input values were provided.")
+                for col in insert_columns:
+                    name = col["name"]
+                    data_type = col["data_type"]
 
-            placeholders = ", ".join(["%s"] * len(col_names))
-            columns_sql = ", ".join([f'"{c}"' for c in col_names])
+                    raw_value = form_values.get(name)
+                    converted_value = self._convert_value(raw_value, data_type)
 
-            insert_sql = f"""
-            INSERT INTO {META_SCHEMA}.{table_name}
-            ({columns_sql})
-            VALUES ({placeholders})
-            """
+                    if converted_value is not None:
+                        col_names.append(name)
+                        values.append(converted_value)
 
-            hook.run(insert_sql, parameters=tuple(values))
+                if not col_names:
+                    error_message = "입력된 값이 없습니다."
+                else:
+                    placeholders = ", ".join(["%s"] * len(col_names))
+                    columns_sql = ", ".join([f'"{c}"' for c in col_names])
 
-            return redirect(f"/etl-meta/?meta_type={meta_type}")
+                    insert_sql = f"""
+                    INSERT INTO {META_SCHEMA}.{table_name}
+                    ({columns_sql})
+                    VALUES ({placeholders})
+                    """
+
+                    hook.run(insert_sql, parameters=tuple(values))
+
+                    return redirect(f"/etl-meta/?meta_type={meta_type}")
 
         form_html = ""
+
+        table_comments = COLUMN_COMMENTS.get(table_name, {})
 
         for col in insert_columns:
             name = col["name"]
             data_type = col["data_type"]
             nullable = col["is_nullable"]
+            value = form_values.get(name, "")
 
-            required = "required" if nullable == "NO" else ""
+            required_mark = '<span class="required">*</span>' if name in REQUIRED_COLUMNS else ""
+            required = "required" if name in REQUIRED_COLUMNS or nullable == "NO" else ""
+            comment = table_comments.get(name, "")
 
             if data_type in ("json", "jsonb"):
                 input_html = f"""
-                <textarea name="{escape(name)}" rows="5" {required}></textarea>
+                <textarea name="{escape(name)}" rows="5" {required}>{escape(value)}</textarea>
                 """
             elif data_type == "boolean":
+                true_selected = "selected" if value.lower() == "true" else ""
+                false_selected = "selected" if value.lower() == "false" else ""
+
                 input_html = f"""
                 <select name="{escape(name)}">
                     <option value=""></option>
-                    <option value="true">true</option>
-                    <option value="false">false</option>
+                    <option value="true" {true_selected}>true</option>
+                    <option value="false" {false_selected}>false</option>
                 </select>
                 """
             else:
                 input_html = f"""
-                <input type="text" name="{escape(name)}" {required}>
+                <input type="text" name="{escape(name)}" value="{escape(value)}" {required}>
+                """
+
+            comment_html = ""
+            if comment:
+                comment_html = f"""
+                <div class="comment">{escape(comment)}</div>
                 """
 
             form_html += f"""
             <div class="form-row">
                 <label>
+                    {required_mark}
                     {escape(name)}
                     <span class="type">({escape(data_type)})</span>
                 </label>
+                {comment_html}
                 {input_html}
             </div>
             """
 
         tabs_html = self._render_tabs(meta_type)
+        top_buttons_html = self._render_top_buttons()
+
+        error_html = ""
+        if error_message:
+            error_html = f"""
+            <div class="error-message">
+                {escape(error_message)}
+            </div>
+            """
 
         html = f"""
         <html>
@@ -518,7 +640,11 @@ class EtlMetaView(BaseView):
             <style>
                 .page {{
                     padding: 20px;
-                    max-width: 900px;
+                    max-width: 950px;
+                }}
+
+                .top-buttons {{
+                    margin-bottom: 15px;
                 }}
 
                 .tabs {{
@@ -540,7 +666,9 @@ class EtlMetaView(BaseView):
                 }}
 
                 .form-row {{
-                    margin-bottom: 14px;
+                    margin-bottom: 16px;
+                    padding-bottom: 12px;
+                    border-bottom: 1px solid #eee;
                 }}
 
                 label {{
@@ -549,10 +677,26 @@ class EtlMetaView(BaseView):
                     margin-bottom: 5px;
                 }}
 
+                .required {{
+                    color: #ff4d4f;
+                    font-weight: bold;
+                    margin-right: 4px;
+                }}
+
                 .type {{
                     color: #777;
                     font-weight: normal;
                     font-size: 12px;
+                }}
+
+                .comment {{
+                    margin-bottom: 6px;
+                    padding: 7px 9px;
+                    background-color: #f5f5f5;
+                    border-left: 4px solid #017cee;
+                    color: #333;
+                    font-size: 12px;
+                    line-height: 1.4;
                 }}
 
                 input, textarea, select {{
@@ -564,22 +708,40 @@ class EtlMetaView(BaseView):
                 }}
 
                 .btn {{
+                    display: inline-block;
                     padding: 9px 16px;
                     background-color: #017cee;
                     color: white;
                     border: none;
                     border-radius: 4px;
                     cursor: pointer;
+                    text-decoration: none;
+                }}
+
+                .btn.gray {{
+                    background-color: #666;
                 }}
 
                 .back {{
                     display: inline-block;
                     margin-bottom: 15px;
                 }}
+
+                .error-message {{
+                    margin-bottom: 15px;
+                    padding: 12px 14px;
+                    background-color: #ffe8e8;
+                    border: 1px solid #ff9f9f;
+                    color: #b00020;
+                    border-radius: 4px;
+                    font-weight: bold;
+                }}
             </style>
         </head>
         <body>
             <div class="page">
+                {top_buttons_html}
+
                 <a class="back" href="/etl-meta/?meta_type={escape(meta_type)}">← 목록으로</a>
 
                 <h2>신규 DAG 설정 등록</h2>
@@ -590,7 +752,9 @@ class EtlMetaView(BaseView):
 
                 <h3>{escape(META_SCHEMA)}.{escape(table_name)}</h3>
 
-                <form method="post">
+                {error_html}
+
+                <form method="post" novalidate>
                     {form_html}
 
                     <button class="btn" type="submit">저장</button>
