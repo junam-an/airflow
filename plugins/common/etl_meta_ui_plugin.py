@@ -130,7 +130,6 @@ class EtlMetaView(BaseView):
 
         for meta_type, info in META_TABLES.items():
             label = info["label"]
-
             active_class = "active" if meta_type == selected_meta_type else ""
 
             html += f"""
@@ -141,17 +140,113 @@ class EtlMetaView(BaseView):
 
         return html
 
+    def _build_search_area(self, meta_type, column_names, search_column, search_text):
+        option_html = ""
+
+        for col in column_names:
+            selected = "selected" if col == search_column else ""
+            option_html += f"""
+            <option value="{escape(col)}" {selected}>{escape(col)}</option>
+            """
+
+        return f"""
+        <form class="search-box" method="get" action="/etl-meta/">
+            <input type="hidden" name="meta_type" value="{escape(meta_type)}">
+
+            <div class="search-row">
+                <div class="search-item">
+                    <label>항목</label>
+                    <select name="search_column">
+                        <option value="">전체</option>
+                        {option_html}
+                    </select>
+                </div>
+
+                <div class="search-keyword">
+                    <label>검색</label>
+                    <input
+                        type="text"
+                        name="search_text"
+                        value="{escape(search_text)}"
+                        placeholder="예: customer 또는 =customer"
+                    >
+                </div>
+
+                <div class="search-button">
+                    <label>&nbsp;</label>
+                    <button class="btn" type="submit">검색</button>
+                    <a class="btn gray" href="/etl-meta/?meta_type={escape(meta_type)}">초기화</a>
+                </div>
+            </div>
+
+            <div class="search-help">
+                일반 검색: <b>LIKE</b> 검색 / 검색어 앞에 <b>=</b> 입력 시 정확히 일치 검색
+            </div>
+        </form>
+        """
+
+    def _build_search_sql(self, column_names, search_column, search_text):
+        if not search_text:
+            return "", []
+
+        search_text = search_text.strip()
+
+        if not search_text:
+            return "", []
+
+        is_equal_search = search_text.startswith("=")
+
+        if is_equal_search:
+            keyword = search_text[1:].strip()
+            operator = "="
+            value = keyword
+        else:
+            keyword = search_text
+            operator = "LIKE"
+            value = f"%{keyword}%"
+
+        if not keyword:
+            return "", []
+
+        # 특정 항목 선택 시
+        if search_column and search_column in column_names:
+            where_sql = f'WHERE "{search_column}"::text {operator} %s'
+            return where_sql, [value]
+
+        # 전체 항목 검색 시
+        conditions = []
+
+        for col in column_names:
+            conditions.append(f'"{col}"::text {operator} %s')
+
+        where_sql = "WHERE " + " OR ".join(conditions)
+        params = [value] * len(column_names)
+
+        return where_sql, params
+
     @expose("/")
     def list(self):
         meta_type = self._get_meta_type()
         table_name = self._get_table_name(meta_type)
+
+        search_column = request.args.get("search_column", "")
+        search_text = request.args.get("search_text", "")
 
         hook = PostgresHook(postgres_conn_id=META_POSTGRES_CONN_ID)
 
         columns = self._get_columns(table_name)
         column_names = [c["name"] for c in columns]
 
-        select_cols = ", ".join(column_names)
+        if search_column not in column_names:
+            search_column = ""
+
+        select_cols = ", ".join([f'"{c}"' for c in column_names])
+
+        where_sql, search_params = self._build_search_sql(
+            column_names=column_names,
+            search_column=search_column,
+            search_text=search_text,
+        )
 
         order_column = None
 
@@ -161,7 +256,7 @@ class EtlMetaView(BaseView):
                 break
 
         if order_column:
-            order_sql = f"ORDER BY {order_column} DESC"
+            order_sql = f'ORDER BY "{order_column}" DESC'
         else:
             order_sql = ""
 
@@ -169,12 +264,21 @@ class EtlMetaView(BaseView):
             f"""
             SELECT {select_cols}
             FROM {META_SCHEMA}.{table_name}
+            {where_sql}
             {order_sql}
             LIMIT 100
-            """
+            """,
+            parameters=tuple(search_params),
         )
 
         tabs_html = self._render_tabs(meta_type)
+
+        search_area_html = self._build_search_area(
+            meta_type=meta_type,
+            column_names=column_names,
+            search_column=search_column,
+            search_text=search_text,
+        )
 
         header_html = "".join(
             f"<th>{escape(col)}</th>"
@@ -223,6 +327,60 @@ class EtlMetaView(BaseView):
                     text-decoration: none;
                     border-radius: 4px;
                     margin-bottom: 15px;
+                    border: none;
+                    cursor: pointer;
+                }}
+
+                .btn.gray {{
+                    background-color: #666;
+                }}
+
+                .search-box {{
+                    padding: 15px;
+                    margin-bottom: 20px;
+                    border: 1px solid #333;
+                    border-radius: 6px;
+                    background-color: #111;
+                }}
+
+                .search-row {{
+                    display: flex;
+                    gap: 12px;
+                    align-items: end;
+                }}
+
+                .search-item {{
+                    width: 260px;
+                }}
+
+                .search-keyword {{
+                    width: 420px;
+                }}
+
+                .search-button {{
+                    min-width: 180px;
+                }}
+
+                .search-box label {{
+                    display: block;
+                    margin-bottom: 5px;
+                    font-weight: bold;
+                }}
+
+                .search-box input,
+                .search-box select {{
+                    width: 100%;
+                    padding: 8px;
+                    border: 1px solid #555;
+                    border-radius: 4px;
+                    background-color: #222;
+                    color: white;
+                }}
+
+                .search-help {{
+                    margin-top: 8px;
+                    color: #aaa;
+                    font-size: 12px;
                 }}
 
                 table {{
@@ -252,6 +410,8 @@ class EtlMetaView(BaseView):
                 </div>
 
                 <h3>{escape(META_SCHEMA)}.{escape(table_name)}</h3>
+
+                {search_area_html}
 
                 <a class="btn" href="/etl-meta/new?meta_type={escape(meta_type)}">
                     신규 DAG 설정 등록
@@ -302,7 +462,7 @@ class EtlMetaView(BaseView):
                 raise Exception("No input values were provided.")
 
             placeholders = ", ".join(["%s"] * len(col_names))
-            columns_sql = ", ".join(col_names)
+            columns_sql = ", ".join([f'"{c}"' for c in col_names])
 
             insert_sql = f"""
             INSERT INTO {META_SCHEMA}.{table_name}
