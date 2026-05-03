@@ -225,22 +225,92 @@ class EtlMetaView(BaseView):
 
         return json.dumps(result, ensure_ascii=False, separators=(",", ":"))
 
-    def _build_sort_header(self, meta_type, column_name, current_sort_column, current_sort_dir, search_column, search_text):
-        next_sort_dir = "ASC"
-        sort_mark = ""
+    def _parse_sort_spec(self, raw_sort: str | None, column_names: list[str]) -> list[tuple[str, str]]:
+        if not raw_sort:
+            return []
 
-        if current_sort_column == column_name:
-            if current_sort_dir == "ASC":
-                next_sort_dir = "DESC"
-                sort_mark = " ▲"
+        result = []
+
+        for item in raw_sort.split(","):
+            item = item.strip()
+            if not item:
+                continue
+
+            if ":" in item:
+                col, direction = item.split(":", 1)
             else:
-                next_sort_dir = "ASC"
-                sort_mark = " ▼"
+                col, direction = item, "asc"
+
+            col = col.strip()
+            direction = direction.strip().lower()
+
+            if col not in column_names:
+                continue
+
+            if direction not in ("asc", "desc"):
+                direction = "asc"
+
+            result.append((col, direction))
+
+        return result
+
+    def _build_order_sql(self, sort_specs: list[tuple[str, str]], column_names: list[str]) -> str:
+        if sort_specs:
+            order_items = []
+            for col, direction in sort_specs:
+                order_items.append(f'"{col}" {direction.upper()}')
+            return "ORDER BY " + ", ".join(order_items)
+
+        for candidate in ["created_at", "updated_at", "update_dt", "id", "dag_id", "source_table", "target_table"]:
+            if candidate in column_names:
+                return f'ORDER BY "{candidate}" DESC'
+
+        return ""
+
+    def _build_sort_query_string(self, meta_type, search_column, search_text, current_sort, clicked_col):
+        sort_specs = []
+
+        if current_sort:
+            for item in current_sort.split(","):
+                item = item.strip()
+                if not item:
+                    continue
+
+                if ":" in item:
+                    col, direction = item.split(":", 1)
+                else:
+                    col, direction = item, "asc"
+
+                col = col.strip()
+                direction = direction.strip().lower()
+
+                if col:
+                    sort_specs.append((col, direction))
+
+        found = False
+        new_specs = []
+
+        for col, direction in sort_specs:
+            if col == clicked_col:
+                found = True
+
+                if direction == "asc":
+                    new_specs.append((col, "desc"))
+                elif direction == "desc":
+                    # DESC 상태에서 한 번 더 클릭하면 정렬 조건에서 제거
+                    continue
+                else:
+                    new_specs.append((col, "asc"))
+            else:
+                new_specs.append((col, direction))
+
+        if not found:
+            new_specs.append((clicked_col, "asc"))
+
+        new_sort = ",".join([f"{col}:{direction}" for col, direction in new_specs])
 
         query_params = {
             "meta_type": meta_type,
-            "sort_column": column_name,
-            "sort_dir": next_sort_dir,
         }
 
         if search_column:
@@ -249,7 +319,29 @@ class EtlMetaView(BaseView):
         if search_text:
             query_params["search_text"] = search_text
 
-        query_string = urlencode(query_params)
+        if new_sort:
+            query_params["sort"] = new_sort
+
+        return urlencode(query_params)
+
+    def _get_sort_mark(self, sort_specs: list[tuple[str, str]], col_name: str) -> str:
+        for idx, (col, direction) in enumerate(sort_specs, start=1):
+            if col == col_name:
+                arrow = "▲" if direction == "asc" else "▼"
+                return f" {arrow}{idx}"
+
+        return ""
+
+    def _build_sort_header(self, meta_type, column_name, sort_specs, current_sort, search_column, search_text):
+        query_string = self._build_sort_query_string(
+            meta_type=meta_type,
+            search_column=search_column,
+            search_text=search_text,
+            current_sort=current_sort,
+            clicked_col=column_name,
+        )
+
+        sort_mark = self._get_sort_mark(sort_specs, column_name)
 
         return f'''
         <th>
@@ -548,8 +640,7 @@ class EtlMetaView(BaseView):
 
         search_column = request.args.get("search_column", "")
         search_text = request.args.get("search_text", "")
-        sort_column = request.args.get("sort_column", "")
-        sort_dir = request.args.get("sort_dir", "DESC").upper()
+        sort = request.args.get("sort", "")
 
         hook = PostgresHook(postgres_conn_id=META_POSTGRES_CONN_ID)
 
@@ -559,11 +650,7 @@ class EtlMetaView(BaseView):
         if search_column not in column_names:
             search_column = ""
 
-        if sort_column not in column_names:
-            sort_column = ""
-
-        if sort_dir not in ("ASC", "DESC"):
-            sort_dir = "DESC"
+        sort_specs = self._parse_sort_spec(sort, column_names)
 
         select_cols = ", ".join([f'"{c}"' for c in column_names])
         row_key_select_sql, _ = self._build_row_key_sql(column_names)
@@ -574,21 +661,7 @@ class EtlMetaView(BaseView):
             search_text=search_text,
         )
 
-        order_column = None
-
-        if sort_column:
-            order_column = sort_column
-            order_sql = f'ORDER BY "{order_column}" {sort_dir}'
-        else:
-            for candidate in ["created_at", "updated_at", "update_dt", "id", "dag_id", "source_table", "target_table"]:
-                if candidate in column_names:
-                    order_column = candidate
-                    break
-
-            if order_column:
-                order_sql = f'ORDER BY "{order_column}" DESC'
-            else:
-                order_sql = ""
+        order_sql = self._build_order_sql(sort_specs, column_names)
 
         rows = hook.get_records(
             f"""
@@ -628,8 +701,8 @@ class EtlMetaView(BaseView):
             self._build_sort_header(
                 meta_type=meta_type,
                 column_name=col,
-                current_sort_column=sort_column,
-                current_sort_dir=sort_dir,
+                sort_specs=sort_specs,
+                current_sort=sort,
                 search_column=search_column,
                 search_text=search_text,
             )
