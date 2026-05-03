@@ -666,7 +666,7 @@ with DAG(
             run_hist_id = insert_etl_run_hist(
                 dag_id=DAG_ID,
                 run_id=runtime_info["run_id"],
-                task_id=runtime_info["task_id"],
+                task_id=task_name or runtime_info["task_id"],
                 map_index=runtime_info["map_index"],
                 source_table=source_table,
                 target_table=target_table,
@@ -676,6 +676,7 @@ with DAG(
                 input_param=raw_input_param,
                 config_option={
                     **config_option,
+                    "AIRFLOW_TASK_ID": runtime_info["task_id"],
                     "TASK_NAME": task_name,
                     "EXEC_SEQ": str(exec_seq),
                 },
