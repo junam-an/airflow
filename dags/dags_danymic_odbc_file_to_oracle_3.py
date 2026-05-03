@@ -492,7 +492,7 @@ with DAG(
     start_date=datetime(2024, 1, 1),
     schedule=None,
     catchup=False,
-    max_active_tasks=4,
+    max_active_tasks=1,
 ) as dag:
 
     @task
@@ -515,8 +515,7 @@ with DAG(
         )
         SELECT 
         DAG_ID
-        , A.SOURCE_TABLE
-        , A.TARGET_TABLE
+        , TASK_NAME
         , '{"$$P_BASE_DT":"' || P_BASE_DT || 
         '","$$P_START_DT":"' || P_START_DT ||
         '","$$P_END_DT":"' || P_END_DT ||
@@ -528,7 +527,7 @@ with DAG(
         , A.INPUT_PARAM AS ASIS_PARAM
         , TIMEZONE('ASIA/SEOUL', NOW())::TIMESTAMP AS CREATED_TM
         , 'AIRFLOW' AS CREATE_USER_ID
-        FROM ETL_META_FILE_TO_DB A, BASE_PARAM B
+        FROM etl_meta_file_to_db A, BASE_PARAM B
         WHERE 1=1
         AND DAG_ID = %s
         AND DISABLE_DT = '20991231'
@@ -539,30 +538,30 @@ with DAG(
         UPDATE etl_meta_file_to_db a
         SET input_param = b.tobe_param
         FROM (
-            SELECT dag_id, source_table, target_table, tobe_param
+            SELECT dag_id, task_name, tobe_param
                 FROM etl_param a
                 WHERE dag_id = %s
-                and (source_table, target_table, created_tm) = (
-                select b.source_table, b.target_table, b.created_tm
-                from
+                and (task_name, created_tm) = (
+                select b.task_name, b.created_tm
+                from 
                 (
-                   SELECT dag_id, source_table, target_table, created_tm
+                   SELECT dag_id, task_name, created_tm
                    FROM etl_param
                    WHERE dag_id = a.dag_id
-                   and source_table = a.source_table
-                   and target_table = a.target_table
+                   and task_name = a.task_name
                    order by created_tm desc
                  ) b
                 limit 1
                 )
         ) b
         WHERE a.dag_id = b.dag_id
-        and a.source_table = b.source_table
-        and a.target_table = b.target_table
+        and a.task_name = b.task_name
         """
 
         select_meta_sql = """
         SELECT
+            task_name,
+            COALESCE(exec_seq, 999999) AS exec_seq,
             source_table,
             target_table,
             pk_column,
@@ -583,6 +582,11 @@ with DAG(
           AND enable_yn = 'Y'
           AND dag_id = %s
           AND disable_dt = '20991231'
+        ORDER BY
+            COALESCE(exec_seq, 999999),
+            task_name,
+            source_table,
+            target_table
         """
 
         conn = None
@@ -618,21 +622,27 @@ with DAG(
         configs = []
 
         for r in rows:
-            source_table = (r[0] or "").strip() if r[0] is not None else ""
-            target_table = (r[1] or "").strip() if r[1] is not None else ""
-            pk_columns = parse_csv_columns(r[2])
-            column_mapping = r[3]
-            load_option = (r[4] or "di").strip().lower() if r[4] is not None else "di"
-            stg_drop_yn = (r[5] or "N").strip().upper() if r[5] is not None else "N"
-            source_file_type = (r[6] or "").strip().lower() if r[6] is not None else ""
-            csv_file_delimiter = (r[7] or ",") if r[7] is not None else ","
-            source_file_encoding = (r[8] or "utf-8").strip() if r[8] is not None else "utf-8"
-            source_file_dir = (r[9] or "").strip() if r[9] is not None else ""
-            source_pre_cmd = (r[10] or "").strip() if r[10] is not None else ""
-            target_pre_sql = (r[11] or "").strip() if r[11] is not None else ""
-            target_post_sql = (r[12] or "").strip() if r[12] is not None else ""
-            config_option = (r[13] or "").strip() if r[13] is not None else ""
-            input_param = (r[14] or "").strip() if r[14] is not None else ""
+            task_name = (r[0] or "").strip() if r[0] is not None else ""
+            exec_seq = int(r[1]) if r[1] is not None else 999999
+
+            source_table = (r[2] or "").strip() if r[2] is not None else ""
+            target_table = (r[3] or "").strip() if r[3] is not None else ""
+            pk_columns = parse_csv_columns(r[4])
+            column_mapping = r[5]
+            load_option = (r[6] or "di").strip().lower() if r[6] is not None else "di"
+            stg_drop_yn = (r[7] or "N").strip().upper() if r[7] is not None else "N"
+            source_file_type = (r[8] or "").strip().lower() if r[8] is not None else ""
+            csv_file_delimiter = (r[9] or ",") if r[9] is not None else ","
+            source_file_encoding = (r[10] or "utf-8").strip() if r[10] is not None else "utf-8"
+            source_file_dir = (r[11] or "").strip() if r[11] is not None else ""
+            source_pre_cmd = (r[12] or "").strip() if r[12] is not None else ""
+            target_pre_sql = (r[13] or "").strip() if r[13] is not None else ""
+            target_post_sql = (r[14] or "").strip() if r[14] is not None else ""
+            config_option = (r[15] or "").strip() if r[15] is not None else ""
+            input_param = (r[16] or "").strip() if r[16] is not None else ""
+
+            if not task_name:
+                task_name = f"{source_table}_to_{target_table}"
 
             normalized_source_file_encoding = normalize_file_encoding(source_file_encoding)
             parsed_config_option = parse_config_option(config_option)
@@ -684,6 +694,8 @@ with DAG(
 
             configs.append(
                 {
+                    "task_name": task_name,
+                    "exec_seq": exec_seq,
                     "source_table": source_table,
                     "target_table": target_table,
                     "pk_columns": pk_columns,
@@ -703,11 +715,24 @@ with DAG(
                 }
             )
 
+        print("Loaded ETL configs by exec_seq:")
+        for idx, cfg in enumerate(configs):
+            print(
+                f"map_index={idx}, "
+                f"exec_seq={cfg.get('exec_seq')}, "
+                f"task_name={cfg.get('task_name')}, "
+                f"source_table={cfg.get('source_table')}, "
+                f"target_table={cfg.get('target_table')}"
+            )
+
         return configs
 
     @task(pool_slots=1)
     def run_etl(table_config: dict, **context):
         runtime_info = get_task_runtime_info(**context)
+
+        task_name = (table_config.get("task_name") or "").strip()
+        exec_seq = table_config.get("exec_seq")
 
         source_table = (table_config.get("source_table") or "").strip()
         target_table = (table_config.get("target_table") or "").strip()
@@ -727,6 +752,14 @@ with DAG(
         config_option = table_config.get("config_option") or {}
 
         target_conn_name = (table_config.get("target_conn_name") or "").strip()
+
+        print(
+            f"START ETL "
+            f"task_name={task_name}, "
+            f"exec_seq={exec_seq}, "
+            f"source_table={source_table}, "
+            f"target_table={target_table}"
+        )
 
         run_hist_id = None
         extract_row_count = 0
@@ -783,7 +816,11 @@ with DAG(
                 source_conn_name="",
                 target_conn_name=target_conn_name,
                 input_param=raw_input_param,
-                config_option=config_option,
+                config_option={
+                    **config_option,
+                    "TASK_NAME": task_name,
+                    "EXEC_SEQ": str(exec_seq),
+                },
             )
 
             input_params = parse_input_params(raw_input_param)
@@ -809,6 +846,8 @@ with DAG(
             source_dir_path = Path(source_file_dir)
             matched_files = sorted(source_dir_path.glob(source_file_pattern))
 
+            print(f"[DEBUG] task_name={task_name}")
+            print(f"[DEBUG] exec_seq={exec_seq}")
             print(f"[DEBUG] target_conn_name={target_conn_name}")
             print(f"[DEBUG] source_file_dir={source_file_dir}")
             print(f"[DEBUG] source_file_pattern={source_file_pattern}")
@@ -985,6 +1024,7 @@ with DAG(
                             stg_count = target_hook.get_first(stg_count_sql)[0]
 
                             print(
+                                f"task_name={task_name}, exec_seq={exec_seq}, "
                                 f"{file_path} -> {stg_table} "
                                 f"file_rows={len(normalized_rows)} "
                                 f"total_rows={stg_load_row_count} "
@@ -1139,7 +1179,22 @@ with DAG(
                 target_file_path=target_file_path,
             )
 
+            print(
+                f"END ETL SUCCESS "
+                f"task_name={task_name}, "
+                f"exec_seq={exec_seq}, "
+                f"source_table={source_table}, "
+                f"target_table={target_table}"
+            )
+
         except Exception:
+            print(
+                f"END ETL FAILED "
+                f"task_name={task_name}, "
+                f"exec_seq={exec_seq}, "
+                f"source_table={source_table}, "
+                f"target_table={target_table}"
+            )
             if run_hist_id is not None:
                 update_etl_run_hist_failed(
                     run_hist_id=run_hist_id,
