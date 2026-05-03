@@ -828,3 +828,7 @@ with DAG(
 
     table_configs = get_table_configs()
     run_etl.expand(table_config=table_configs)
+
+    @task(task_id="finish_etl")
+    def finish_etl():
+    print("finish")
