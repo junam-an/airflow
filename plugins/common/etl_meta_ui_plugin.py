@@ -11,15 +11,40 @@ from airflow.providers.postgres.hooks.postgres import PostgresHook
 
 
 META_POSTGRES_CONN_ID = "postgres_conn"
-META_TABLE_NAME = "etl_meta"
 META_SCHEMA = "public"
+
+META_TABLES = {
+    "db_to_db": {
+        "label": "DB → DB",
+        "table": "etl_meta_db_to_db",
+    },
+    "db_to_file": {
+        "label": "DB → File",
+        "table": "etl_meta_db_to_file",
+    },
+    "file_to_db": {
+        "label": "File → DB",
+        "table": "etl_meta_file_to_db",
+    },
+}
 
 
 class EtlMetaView(BaseView):
     route_base = "/etl-meta"
     default_view = "list"
 
-    def _get_columns(self):
+    def _get_meta_type(self):
+        meta_type = request.args.get("meta_type", "db_to_db")
+
+        if meta_type not in META_TABLES:
+            meta_type = "db_to_db"
+
+        return meta_type
+
+    def _get_table_name(self, meta_type):
+        return META_TABLES[meta_type]["table"]
+
+    def _get_columns(self, table_name):
         hook = PostgresHook(postgres_conn_id=META_POSTGRES_CONN_ID)
 
         sql = """
@@ -34,7 +59,10 @@ class EtlMetaView(BaseView):
         ORDER BY ordinal_position
         """
 
-        rows = hook.get_records(sql, parameters=(META_SCHEMA, META_TABLE_NAME))
+        rows = hook.get_records(sql, parameters=(META_SCHEMA, table_name))
+
+        if not rows:
+            raise Exception(f"Table not found or no columns: {META_SCHEMA}.{table_name}")
 
         return [
             {
@@ -46,8 +74,8 @@ class EtlMetaView(BaseView):
             for r in rows
         ]
 
-    def _get_insert_columns(self):
-        columns = self._get_columns()
+    def _get_insert_columns(self, table_name):
+        columns = self._get_columns(table_name)
 
         skip_columns = {
             "id",
@@ -97,23 +125,56 @@ class EtlMetaView(BaseView):
 
         return value
 
+    def _render_tabs(self, selected_meta_type):
+        html = ""
+
+        for meta_type, info in META_TABLES.items():
+            label = info["label"]
+
+            active_class = "active" if meta_type == selected_meta_type else ""
+
+            html += f"""
+            <a class="tab {active_class}" href="/etl-meta/?meta_type={escape(meta_type)}">
+                {escape(label)}
+            </a>
+            """
+
+        return html
+
     @expose("/")
     def list(self):
+        meta_type = self._get_meta_type()
+        table_name = self._get_table_name(meta_type)
+
         hook = PostgresHook(postgres_conn_id=META_POSTGRES_CONN_ID)
 
-        columns = self._get_columns()
+        columns = self._get_columns(table_name)
         column_names = [c["name"] for c in columns]
 
         select_cols = ", ".join(column_names)
 
+        order_column = None
+
+        for candidate in ["created_at", "updated_at", "id", "dag_id", "source_table", "target_table"]:
+            if candidate in column_names:
+                order_column = candidate
+                break
+
+        if order_column:
+            order_sql = f"ORDER BY {order_column} DESC"
+        else:
+            order_sql = ""
+
         rows = hook.get_records(
             f"""
             SELECT {select_cols}
-            FROM {META_SCHEMA}.{META_TABLE_NAME}
-            ORDER BY 1 DESC
+            FROM {META_SCHEMA}.{table_name}
+            {order_sql}
             LIMIT 100
             """
         )
+
+        tabs_html = self._render_tabs(meta_type)
 
         header_html = "".join(
             f"<th>{escape(col)}</th>"
@@ -135,6 +196,25 @@ class EtlMetaView(BaseView):
                 .page {{
                     padding: 20px;
                 }}
+
+                .tabs {{
+                    margin-bottom: 20px;
+                }}
+
+                .tab {{
+                    display: inline-block;
+                    padding: 9px 14px;
+                    margin-right: 6px;
+                    background-color: #333;
+                    color: white;
+                    text-decoration: none;
+                    border-radius: 4px;
+                }}
+
+                .tab.active {{
+                    background-color: #017cee;
+                }}
+
                 .btn {{
                     display: inline-block;
                     padding: 8px 14px;
@@ -144,18 +224,22 @@ class EtlMetaView(BaseView):
                     border-radius: 4px;
                     margin-bottom: 15px;
                 }}
+
                 table {{
                     border-collapse: collapse;
                     width: 100%;
                     font-size: 13px;
                 }}
+
                 th, td {{
                     border: 1px solid #ddd;
                     padding: 8px;
                     vertical-align: top;
                 }}
+
                 th {{
                     background-color: #f5f5f5;
+                    color: #222;
                 }}
             </style>
         </head>
@@ -163,7 +247,15 @@ class EtlMetaView(BaseView):
             <div class="page">
                 <h2>ETL Meta 관리</h2>
 
-                <a class="btn" href="/etl-meta/new">신규 DAG 설정 등록</a>
+                <div class="tabs">
+                    {tabs_html}
+                </div>
+
+                <h3>{escape(META_SCHEMA)}.{escape(table_name)}</h3>
+
+                <a class="btn" href="/etl-meta/new?meta_type={escape(meta_type)}">
+                    신규 DAG 설정 등록
+                </a>
 
                 <h3>최근 등록된 설정</h3>
 
@@ -184,7 +276,10 @@ class EtlMetaView(BaseView):
 
     @expose("/new", methods=["GET", "POST"])
     def new(self):
-        insert_columns = self._get_insert_columns()
+        meta_type = self._get_meta_type()
+        table_name = self._get_table_name(meta_type)
+
+        insert_columns = self._get_insert_columns(table_name)
 
         if request.method == "POST":
             hook = PostgresHook(postgres_conn_id=META_POSTGRES_CONN_ID)
@@ -203,18 +298,21 @@ class EtlMetaView(BaseView):
                     col_names.append(name)
                     values.append(converted_value)
 
+            if not col_names:
+                raise Exception("No input values were provided.")
+
             placeholders = ", ".join(["%s"] * len(col_names))
             columns_sql = ", ".join(col_names)
 
             insert_sql = f"""
-            INSERT INTO {META_SCHEMA}.{META_TABLE_NAME}
+            INSERT INTO {META_SCHEMA}.{table_name}
             ({columns_sql})
             VALUES ({placeholders})
             """
 
             hook.run(insert_sql, parameters=tuple(values))
 
-            return redirect("/etl-meta/")
+            return redirect(f"/etl-meta/?meta_type={meta_type}")
 
         form_html = ""
 
@@ -252,6 +350,8 @@ class EtlMetaView(BaseView):
             </div>
             """
 
+        tabs_html = self._render_tabs(meta_type)
+
         html = f"""
         <html>
         <head>
@@ -260,19 +360,41 @@ class EtlMetaView(BaseView):
                     padding: 20px;
                     max-width: 900px;
                 }}
+
+                .tabs {{
+                    margin-bottom: 20px;
+                }}
+
+                .tab {{
+                    display: inline-block;
+                    padding: 9px 14px;
+                    margin-right: 6px;
+                    background-color: #333;
+                    color: white;
+                    text-decoration: none;
+                    border-radius: 4px;
+                }}
+
+                .tab.active {{
+                    background-color: #017cee;
+                }}
+
                 .form-row {{
                     margin-bottom: 14px;
                 }}
+
                 label {{
                     display: block;
                     font-weight: bold;
                     margin-bottom: 5px;
                 }}
+
                 .type {{
                     color: #777;
                     font-weight: normal;
                     font-size: 12px;
                 }}
+
                 input, textarea, select {{
                     width: 100%;
                     padding: 8px;
@@ -280,6 +402,7 @@ class EtlMetaView(BaseView):
                     border-radius: 4px;
                     font-size: 13px;
                 }}
+
                 .btn {{
                     padding: 9px 16px;
                     background-color: #017cee;
@@ -288,6 +411,7 @@ class EtlMetaView(BaseView):
                     border-radius: 4px;
                     cursor: pointer;
                 }}
+
                 .back {{
                     display: inline-block;
                     margin-bottom: 15px;
@@ -296,9 +420,15 @@ class EtlMetaView(BaseView):
         </head>
         <body>
             <div class="page">
-                <a class="back" href="/etl-meta/">← 목록으로</a>
+                <a class="back" href="/etl-meta/?meta_type={escape(meta_type)}">← 목록으로</a>
 
                 <h2>신규 DAG 설정 등록</h2>
+
+                <div class="tabs">
+                    {tabs_html}
+                </div>
+
+                <h3>{escape(META_SCHEMA)}.{escape(table_name)}</h3>
 
                 <form method="post">
                     {form_html}
