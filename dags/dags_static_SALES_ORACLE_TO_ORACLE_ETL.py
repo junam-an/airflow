@@ -5,7 +5,7 @@ from datetime import datetime
 from airflow import DAG
 from airflow.decorators import task
 
-from common.static_odbc_oracle_to_oracle_etl_minute import create_odbc_to_odbc_meta_task
+from common.static_odbc_oracle_to_oracle_etl_minute import run_odbc_to_odbc_common
 
 
 DAG_ID = "STATIC_ORACLE_TO_ORACLE_ETL_META_3"
@@ -21,7 +21,7 @@ with DAG(
 
     @task(task_id="TASK1")
     def TASK1(**context):
-        create_odbc_to_odbc_meta_task(
+        run_odbc_to_odbc_common(
             dag_id="DYNAMIC_ORACLE_TO_ORACLE_ETL_META_3",
             task_name="TASK1",
             **context,
@@ -29,7 +29,7 @@ with DAG(
 
     @task(task_id="TASK2")
     def TASK2(**context):
-        create_odbc_to_odbc_meta_task(
+        run_odbc_to_odbc_common(
             dag_id="DYNAMIC_ORACLE_TO_ORACLE_ETL_META_3",
             task_name="TASK2",
             **context,
