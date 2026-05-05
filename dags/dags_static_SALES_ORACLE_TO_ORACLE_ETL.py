@@ -21,7 +21,7 @@ with DAG(
 
     @task(task_id="TASK1")
     def TASK1(**context):
-        return create_odbc_to_odbc_meta_task(
+        create_odbc_to_odbc_meta_task(
             dag_id="DYNAMIC_ORACLE_TO_ORACLE_ETL_META_3",
             task_name="TASK1",
             **context,
@@ -29,7 +29,7 @@ with DAG(
 
     @task(task_id="TASK2")
     def TASK2(**context):
-        return create_odbc_to_odbc_meta_task(
+        create_odbc_to_odbc_meta_task(
             dag_id="DYNAMIC_ORACLE_TO_ORACLE_ETL_META_3",
             task_name="TASK2",
             **context,
