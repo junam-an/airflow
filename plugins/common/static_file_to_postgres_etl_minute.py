@@ -784,6 +784,9 @@ def run_file_to_postgres_etl(
                             f"{target_table}: duplicate target columns detected after mapping. "
                             f"source_columns={expected_source_columns}, target_columns={target_columns}"
                         )
+                    
+                    pk_columns = [str(pk).strip().upper() for pk in pk_columns]
+                    target_columns = [str(col).strip().upper() for col in target_columns]
 
                     missing_pk_columns = [
                         pk for pk in pk_columns if pk not in target_columns
@@ -1045,7 +1048,7 @@ def create_file_to_postgres_task(
 
     @task(task_id=airflow_task_id)
     def _static_etl_task(**context):
-        return run_file_to_postgres_etl(
+        run_file_to_postgres_etl(
             dag_id=dag_id,
             task_name=task_name,
             meta_postgres_conn_id=meta_postgres_conn_id,
