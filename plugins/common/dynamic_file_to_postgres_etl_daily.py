@@ -879,8 +879,13 @@ def create_file_to_postgres_meta_v2_tasks(
                                 f"target_columns={target_columns}"
                             )
 
+                        pk_columns_upper = [str(pk).strip().upper() for pk in pk_columns]
+                        target_columns_upper = [str(col).strip().upper() for col in target_columns]
+
                         missing_pk_columns = [
-                            pk for pk in pk_columns if pk not in target_columns
+                            #pk for pk in pk_columns if pk not in target_columns
+                            pk for pk in pk_columns_upper
+                            if str(pk).strip().upper() not in target_columns_upper
                         ]
 
                         if missing_pk_columns:
