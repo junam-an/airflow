@@ -929,7 +929,7 @@ def create_odbc_to_file_meta_task(
         run_odbc_to_file_common(
             dag_id=dag_id,
             task_name=task_name,
-            meta_postgres_conn_id=DEFAULT_META_POSTGRES_CONN_ID,
+            meta_postgres_conn_id=meta_postgres_conn_id,
             **context,
         )
 
