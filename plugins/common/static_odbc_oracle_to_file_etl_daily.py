@@ -523,7 +523,7 @@ def get_odbc_to_file_task_config(
 def run_odbc_to_file_common(
     dag_id: str,
     task_name: str,
-    meta_postgres_conn_id: str,
+    meta_postgres_conn_id: str = DEFAULT_META_POSTGRES_CONN_ID,
     **context,
 ) -> None:
     """
