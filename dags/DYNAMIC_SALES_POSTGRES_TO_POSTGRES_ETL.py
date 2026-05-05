@@ -6,7 +6,7 @@ from airflow import DAG
 #from airflow.providers.standard.operators.bash import BashOperator
 from airflow.operators.bash import BashOperator
 
-from common.postgres_to_postgres_etl_daily import create_postgres_to_postgres_tasks
+from common.dynamic_postgres_to_postgres_etl_daily import create_postgres_to_postgres_tasks
 
 
 DAG_ID = "DYNAMIC_SALES_POSTGRES_TO_POSTGRES_ETL"
