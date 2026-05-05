@@ -397,8 +397,8 @@ def get_odbc_to_file_task_config(
         target_file_dir,
         target_pre_cmd,
         target_post_cmd,
-        config_option,
-        input_param
+        input_param,
+        config_option
     FROM etl_meta_db_to_file
     WHERE 1=1
       AND enable_yn = 'Y'
