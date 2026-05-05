@@ -880,7 +880,7 @@ def create_postgres_to_file_task(
 
     @task(task_id=airflow_task_id)
     def _static_etl_task(**context):
-        return run_postgres_to_file_etl(
+        run_postgres_to_file_etl(
             dag_id=dag_id,
             task_name=task_name,
             meta_postgres_conn_id=meta_postgres_conn_id,
