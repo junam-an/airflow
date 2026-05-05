@@ -3,7 +3,8 @@ from __future__ import annotations
 from datetime import datetime
 
 from airflow import DAG
-from airflow.providers.standard.operators.bash import BashOperator
+#from airflow.providers.standard.operators.bash import BashOperator
+from airflow.operators.bash import BashOperator
 
 from common.postgres_to_postgres_etl_daily import create_postgres_to_postgres_tasks
 
