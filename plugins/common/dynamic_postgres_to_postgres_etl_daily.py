@@ -220,40 +220,6 @@ def create_postgres_to_postgres_tasks(
 
         meta_hook.run("SET TIME ZONE 'Asia/Seoul'")
 
-        insert_etl_param_sql = """
-        INSERT INTO ETL_PARAM
-        WITH BASE_PARAM AS
-        (
-        SELECT
-        YESTERDAY_DT AS P_BASE_DT
-        , YESTERDAY_DT AS P_START_DT
-        , YESTERDAY_DT AS P_END_DT
-        , BEF_MAX_DAY AS P_BEF_MAX_DT
-        , MAX_DAY AS P_MAX_DT
-        FROM ETL_CALENDAR
-        WHERE 1=1
-        AND TODAY_DT = TO_CHAR(TIMEZONE('ASIA/SEOUL', CURRENT_DATE)::TIMESTAMP, 'YYYYMMDD')
-        )
-        SELECT 
-        DAG_ID
-        , TASK_NAME
-        , '{"$$P_BASE_DT":"' || P_BASE_DT || 
-        '","$$P_START_DT":"' || P_START_DT ||
-        '","$$P_END_DT":"' || P_END_DT ||
-        '","$$P_START_TM":"' || (INPUT_PARAM::JSON ->> '$$P_END_TM') ||
-        '","$$P_END_TM":"' || TO_CHAR(TIMEZONE('ASIA/SEOUL', NOW())::TIMESTAMP, 'YYYYMMDDHH24MISS') ||
-        '","$$P_BEF_MAX_DT":"' || P_BEF_MAX_DT ||
-        '","$$P_MAX_DT":"' || P_MAX_DT ||
-        '"}' AS TOBE_PARAM
-        , A.INPUT_PARAM AS ASIS_PARAM
-        , TIMEZONE('ASIA/SEOUL', NOW())::TIMESTAMP AS CREATED_TM
-        , 'AIRFLOW' AS CREATE_USER_ID
-        FROM ETL_META_DB_TO_DB A, BASE_PARAM B
-        WHERE 1=1
-        AND DAG_ID = %s
-        AND DISABLE_DT = '20991231'
-        AND ENABLE_YN = 'Y'
-        """
 
         update_input_param_sql = """
         UPDATE etl_meta_db_to_db a
@@ -312,9 +278,6 @@ def create_postgres_to_postgres_tasks(
             conn = meta_hook.get_conn()
             conn.autocommit = False
             cursor = conn.cursor()
-
-            cursor.execute(insert_etl_param_sql, (dag_id,))
-            conn.commit()
 
             cursor.execute(update_input_param_sql, (dag_id,))
             cursor.execute(select_meta_sql, (dag_id,))
