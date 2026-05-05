@@ -23,7 +23,7 @@ with DAG(
 
     @task(task_id="TASK1")
     def TASK1(**context):
-        return run_postgres_to_postgres_etl(
+        run_postgres_to_postgres_etl(
             dag_id="DYNAMIC_SALES_POSTGRES_TO_POSTGRES_ETL",
             task_name="TASK1",
             **context,
@@ -31,7 +31,7 @@ with DAG(
 
     @task(task_id="TASK2")
     def TASK2(**context):
-        return run_postgres_to_postgres_etl(
+        run_postgres_to_postgres_etl(
             dag_id="DYNAMIC_SALES_POSTGRES_TO_POSTGRES_ETL",
             task_name="TASK2",
             **context,
