@@ -829,10 +829,10 @@ with DAG(
     table_configs = get_table_configs()
     run_etl_tasks = run_etl.expand(table_config=table_configs)
 
-    @task(task_id="finish_etl")
-    def finish_etl():
-        print("finish")
+#    @task(task_id="finish_etl")
+#    def finish_etl():
+#        print("finish")
 
-    finish_task = finish_etl()
+#    finish_task = finish_etl()
 
-    run_etl_tasks >> finish_task
+#    run_etl_tasks >> finish_task

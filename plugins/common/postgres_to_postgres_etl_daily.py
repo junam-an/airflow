@@ -2,9 +2,7 @@ from __future__ import annotations
 
 import json
 import traceback
-from datetime import datetime
 
-from airflow import DAG
 from airflow.decorators import task
 from airflow.providers.postgres.hooks.postgres import PostgresHook
 
@@ -16,10 +14,7 @@ from common.etl_hist_utils import (
 )
 
 
-DAG_ID = "DYNAMIC_POSTGRES_TO_POSTGRES_ETL_META_100"
-
 META_POSTGRES_CONN_ID = "postgres_conn"
-
 CHUNK_SIZE = 5000
 
 
@@ -204,17 +199,24 @@ def build_limit_0_sql(source_exec_sql: str) -> str:
     """
 
 
-with DAG(
-    dag_id=DAG_ID,
-    start_date=datetime(2024, 1, 1),
-    schedule=None,
-    catchup=False,
-    max_active_tasks=4,
-) as dag:
+def create_postgres_to_postgres_tasks(
+    dag_id: str,
+    meta_postgres_conn_id: str = META_POSTGRES_CONN_ID,
+    chunk_size: int = CHUNK_SIZE,
+):
+    """
+    PostgreSQL -> PostgreSQL ETL 공통 Task 생성 함수
 
-    @task
+    다른 DAG에서는 이 함수에 dag_id만 넘겨서 사용한다.
+
+    return:
+        get_table_configs task
+        run_etl mapped task
+    """
+
+    @task(task_id="get_table_configs")
     def get_table_configs():
-        meta_hook = PostgresHook(postgres_conn_id=META_POSTGRES_CONN_ID)
+        meta_hook = PostgresHook(postgres_conn_id=meta_postgres_conn_id)
 
         meta_hook.run("SET TIME ZONE 'Asia/Seoul'")
 
@@ -234,8 +236,7 @@ with DAG(
         )
         SELECT 
         DAG_ID
-        , A.SOURCE_TABLE
-        , A.TARGET_TABLE
+        , TASK_NAME
         , '{"$$P_BASE_DT":"' || P_BASE_DT || 
         '","$$P_START_DT":"' || P_START_DT ||
         '","$$P_END_DT":"' || P_END_DT ||
@@ -258,30 +259,29 @@ with DAG(
         UPDATE etl_meta_db_to_db a
         SET input_param = b.tobe_param
         FROM (
-            SELECT dag_id, source_table, target_table, tobe_param
-                FROM etl_param a
-                WHERE dag_id = %s
-                and (source_table, target_table, created_tm) = (
-                select b.source_table, b.target_table, b.created_tm
-                from 
-                (
-                   SELECT dag_id, source_table, target_table, created_tm
-                   FROM etl_param
-                   WHERE dag_id = a.dag_id
-                   and source_table = a.source_table
-                   and target_table = a.target_table
-                   order by created_tm desc
-                 ) b
-                limit 1
-                )
+            SELECT dag_id, task_name, tobe_param
+            FROM etl_param a
+            WHERE dag_id = %s
+              AND (task_name, created_tm) = (
+                    SELECT b.task_name, b.created_tm
+                    FROM (
+                        SELECT dag_id, task_name, created_tm
+                        FROM etl_param
+                        WHERE dag_id = a.dag_id
+                          AND task_name = a.task_name
+                        ORDER BY created_tm DESC
+                    ) b
+                    LIMIT 1
+              )
         ) b
         WHERE a.dag_id = b.dag_id
-        and a.source_table = b.source_table
-        and a.target_table = b.target_table
+          AND a.task_name = b.task_name
         """
 
         select_meta_sql = """
         SELECT
+            task_name,
+            COALESCE(exec_seq, 999999) AS exec_seq,
             source_table,
             target_table,
             pk_column,
@@ -298,6 +298,11 @@ with DAG(
           AND enable_yn = 'Y'
           AND dag_id = %s
           AND disable_dt = '20991231'
+        ORDER BY
+            COALESCE(exec_seq, 999999),
+            task_name,
+            source_table,
+            target_table
         """
 
         conn = None
@@ -308,11 +313,11 @@ with DAG(
             conn.autocommit = False
             cursor = conn.cursor()
 
-            cursor.execute(insert_etl_param_sql, (DAG_ID,))
+            cursor.execute(insert_etl_param_sql, (dag_id,))
             conn.commit()
 
-            cursor.execute(update_input_param_sql, (DAG_ID,))
-            cursor.execute(select_meta_sql, (DAG_ID,))
+            cursor.execute(update_input_param_sql, (dag_id,))
+            cursor.execute(select_meta_sql, (dag_id,))
             rows = cursor.fetchall()
 
             conn.commit()
@@ -331,17 +336,23 @@ with DAG(
         configs = []
 
         for r in rows:
-            source_table = (r[0] or "").strip() if r[0] is not None else ""
-            target_table = (r[1] or "").strip() if r[1] is not None else ""
-            pk_columns = parse_csv_columns(r[2])
-            source_exec_sql = (r[3] or "").strip() if r[3] is not None else ""
-            column_mapping = r[4]
-            load_option = (r[5] or "di").strip().lower() if r[5] is not None else "di"
-            stg_drop_yn = (r[6] or "N").strip().upper() if r[6] is not None else "N"
-            target_pre_sql = (r[7] or "").strip() if r[7] is not None else ""
-            target_post_sql = (r[8] or "").strip() if r[8] is not None else ""
-            config_option = (r[9] or "").strip() if r[9] is not None else ""
-            input_param = (r[10] or "").strip() if r[10] is not None else ""
+            task_name = (r[0] or "").strip() if r[0] is not None else ""
+            exec_seq = int(r[1]) if r[1] is not None else 999999
+
+            source_table = (r[2] or "").strip() if r[2] is not None else ""
+            target_table = (r[3] or "").strip() if r[3] is not None else ""
+            pk_columns = parse_csv_columns(r[4])
+            source_exec_sql = (r[5] or "").strip() if r[5] is not None else ""
+            column_mapping = r[6]
+            load_option = (r[7] or "di").strip().lower() if r[7] is not None else "di"
+            stg_drop_yn = (r[8] or "N").strip().upper() if r[8] is not None else "N"
+            target_pre_sql = (r[9] or "").strip() if r[9] is not None else ""
+            target_post_sql = (r[10] or "").strip() if r[10] is not None else ""
+            config_option = (r[11] or "").strip() if r[11] is not None else ""
+            input_param = (r[12] or "").strip() if r[12] is not None else ""
+
+            if not task_name:
+                task_name = f"{source_table}_to_{target_table}"
 
             if not target_table:
                 raise ValueError("etl_meta.target_table is empty")
@@ -384,6 +395,8 @@ with DAG(
 
             configs.append(
                 {
+                    "task_name": task_name,
+                    "exec_seq": exec_seq,
                     "source_table": source_table,
                     "target_table": target_table,
                     "pk_columns": pk_columns,
@@ -400,11 +413,25 @@ with DAG(
                 }
             )
 
+        print(f"Loaded ETL configs for dag_id={dag_id}")
+
+        for idx, cfg in enumerate(configs):
+            print(
+                f"map_index={idx}, "
+                f"exec_seq={cfg.get('exec_seq')}, "
+                f"task_name={cfg.get('task_name')}, "
+                f"source_table={cfg.get('source_table')}, "
+                f"target_table={cfg.get('target_table')}"
+            )
+
         return configs
 
-    @task(pool_slots=1)
+    @task(task_id="run_etl", pool_slots=1)
     def run_etl(table_config: dict, **context):
         runtime_info = get_task_runtime_info(**context)
+
+        task_name = (table_config.get("task_name") or "").strip()
+        exec_seq = table_config.get("exec_seq")
 
         source_table = (table_config.get("source_table") or "").strip()
         target_table = (table_config.get("target_table") or "").strip()
@@ -419,6 +446,15 @@ with DAG(
         raw_input_param = table_config.get("input_param")
         source_conn_name = (table_config.get("source_conn_name") or "").strip()
         target_conn_name = (table_config.get("target_conn_name") or "").strip()
+
+        print(
+            f"START ETL "
+            f"dag_id={dag_id}, "
+            f"task_name={task_name}, "
+            f"exec_seq={exec_seq}, "
+            f"source_table={source_table}, "
+            f"target_table={target_table}"
+        )
 
         run_hist_id = None
         extract_row_count = 0
@@ -462,9 +498,9 @@ with DAG(
                 )
 
             run_hist_id = insert_etl_run_hist(
-                dag_id=DAG_ID,
+                dag_id=dag_id,
                 run_id=runtime_info["run_id"],
-                task_id=runtime_info["task_id"],
+                task_id=task_name or runtime_info["task_id"],
                 map_index=runtime_info["map_index"],
                 source_table=source_table,
                 target_table=target_table,
@@ -472,7 +508,12 @@ with DAG(
                 source_conn_name=source_conn_name,
                 target_conn_name=target_conn_name,
                 input_param=raw_input_param,
-                config_option=config_option,
+                config_option={
+                    **config_option,
+                    "AIRFLOW_TASK_ID": runtime_info["task_id"],
+                    "TASK_NAME": task_name,
+                    "EXEC_SEQ": str(exec_seq),
+                },
             )
 
             input_params = parse_input_params(raw_input_param)
@@ -482,7 +523,9 @@ with DAG(
             target_post_sql = apply_input_params(raw_target_post_sql, input_params)
 
             if not source_exec_sql:
-                raise ValueError(f"{target_table}: source_exec_sql is empty after param replacement")
+                raise ValueError(
+                    f"{target_table}: source_exec_sql is empty after param replacement"
+                )
 
             stg_table = f"stg_{target_table}"
 
@@ -537,11 +580,6 @@ with DAG(
                     column_mapping.get(src_col, src_col)
                     for src_col in source_columns
                 ]
-
-                if not target_columns:
-                    raise ValueError(
-                        f"{target_table}: mapped target_columns is empty"
-                    )
 
                 if len(set(target_columns)) != len(target_columns):
                     raise ValueError(
@@ -612,11 +650,11 @@ with DAG(
                 """
 
                 source_cursor = source_conn.cursor(name=f"csr_{target_table}")
-                source_cursor.itersize = CHUNK_SIZE
+                source_cursor.itersize = chunk_size
                 source_cursor.execute(source_exec_sql)
 
                 while True:
-                    rows = source_cursor.fetchmany(size=CHUNK_SIZE)
+                    rows = source_cursor.fetchmany(size=chunk_size)
 
                     if not rows:
                         break
@@ -625,7 +663,7 @@ with DAG(
                         table=stg_table,
                         rows=rows,
                         target_fields=target_columns,
-                        commit_every=CHUNK_SIZE,
+                        commit_every=chunk_size,
                         executemany=True,
                     )
 
@@ -633,10 +671,11 @@ with DAG(
                     stg_load_row_count += len(rows)
 
                     print(
+                        f"dag_id={dag_id}, "
+                        f"task_name={task_name}, "
+                        f"exec_seq={exec_seq}, "
                         f"{source_table or '[source_sql]'} -> {stg_table} "
-                        f"chunk={len(rows)} total={stg_load_row_count} "
-                        f"source_columns={source_columns} "
-                        f"target_columns={target_columns}"
+                        f"chunk={len(rows)} total={stg_load_row_count}"
                     )
 
                 if stg_load_row_count > 0:
@@ -652,51 +691,48 @@ with DAG(
                         if load_option == "ui":
                             if update_sql:
                                 target_tx_cursor.execute(update_sql)
+                                target_update_count = target_tx_cursor.rowcount
                                 print(f"{target_table} UPDATE completed")
 
                             target_tx_cursor.execute(insert_not_exists_sql)
-                            print(
-                                f"{stg_table} -> {target_table} INSERT completed (UI), total={stg_load_row_count}"
-                            )
+                            target_insert_count = target_tx_cursor.rowcount
+                            print(f"{target_table} INSERT completed (UI)")
 
                         elif load_option == "di":
                             target_tx_cursor.execute(delete_sql)
+                            target_delete_count = target_tx_cursor.rowcount
                             print(f"{target_table} DELETE completed")
 
                             target_tx_cursor.execute(insert_sql)
-                            target_insert_count = stg_load_row_count
-                            print(
-                                f"{stg_table} -> {target_table} INSERT completed (DI), total={stg_load_row_count}"
-                            )
+                            target_insert_count = target_tx_cursor.rowcount
+                            print(f"{target_table} INSERT completed (DI)")
 
                         elif load_option == "ti":
                             target_tx_cursor.execute(truncate_target_sql)
                             print(f"{target_table} TRUNCATE completed")
 
                             target_tx_cursor.execute(insert_sql)
-                            target_insert_count = stg_load_row_count
-                            print(
-                                f"{stg_table} -> {target_table} INSERT completed (TI), total={stg_load_row_count}"
-                            )
+                            target_insert_count = target_tx_cursor.rowcount
+                            print(f"{target_table} INSERT completed (TI)")
 
                         elif load_option == "i":
                             target_tx_cursor.execute(insert_sql)
-                            target_insert_count = stg_load_row_count
-                            print(
-                                f"{stg_table} -> {target_table} INSERT completed (I), total={stg_load_row_count}"
-                            )
+                            target_insert_count = target_tx_cursor.rowcount
+                            print(f"{target_table} INSERT completed (I)")
 
                         elif load_option == "u":
-                            if not update_sql:
-                                print(
-                                    f"{target_table}: no non-pk columns to update, UPDATE skipped (U)"
-                                )
-                            else:
+                            if update_sql:
                                 target_tx_cursor.execute(update_sql)
+                                target_update_count = target_tx_cursor.rowcount
                                 print(f"{target_table} UPDATE completed (U)")
+                            else:
+                                print(
+                                    f"{target_table}: no non-pk columns to update, UPDATE skipped"
+                                )
 
                         elif load_option == "d":
                             target_tx_cursor.execute(delete_sql)
+                            target_delete_count = target_tx_cursor.rowcount
                             print(f"{target_table} DELETE completed (D)")
 
                         if target_post_sql:
@@ -732,7 +768,7 @@ with DAG(
 
                 if job_succeeded and stg_drop_yn == "Y":
                     target_hook.run(drop_stg_sql)
-                    print(f"{stg_table} dropped (stg_drop_yn=Y)")
+                    print(f"{stg_table} dropped")
                 else:
                     print(
                         f"{stg_table} kept "
@@ -750,7 +786,25 @@ with DAG(
                 target_file_path=target_file_path,
             )
 
+            print(
+                f"END ETL SUCCESS "
+                f"dag_id={dag_id}, "
+                f"task_name={task_name}, "
+                f"exec_seq={exec_seq}, "
+                f"source_table={source_table}, "
+                f"target_table={target_table}"
+            )
+
         except Exception:
+            print(
+                f"END ETL FAILED "
+                f"dag_id={dag_id}, "
+                f"task_name={task_name}, "
+                f"exec_seq={exec_seq}, "
+                f"source_table={source_table}, "
+                f"target_table={target_table}"
+            )
+
             if run_hist_id is not None:
                 update_etl_run_hist_failed(
                     run_hist_id=run_hist_id,
@@ -763,7 +817,10 @@ with DAG(
                     file_write_row_count=file_write_row_count,
                     target_file_path=target_file_path,
                 )
+
             raise
 
     table_configs = get_table_configs()
-    run_etl.expand(table_config=table_configs)
+    run_etl_tasks = run_etl.expand(table_config=table_configs)
+
+    return table_configs, run_etl_tasks
