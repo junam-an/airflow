@@ -17,6 +17,188 @@ META_POSTGRES_CONN_ID = "postgres_conn"
 CHUNK_SIZE = 5000
 
 
+
+def parse_csv_columns(raw_value: str | None) -> list[str]:
+    if raw_value is None:
+        return []
+
+    return [c.strip() for c in raw_value.split(",") if c and c.strip()]
+
+
+def parse_column_mapping(raw_mapping: str | None) -> dict[str, str]:
+    if raw_mapping is None:
+        return {}
+
+    raw_mapping = raw_mapping.strip()
+    if not raw_mapping:
+        return {}
+
+    try:
+        parsed = json.loads(raw_mapping)
+
+        if isinstance(parsed, dict):
+            result = {}
+            for k, v in parsed.items():
+                src = str(k).strip()
+                tgt = str(v).strip()
+
+                if not src or not tgt:
+                    raise ValueError(
+                        f"Invalid column_mapping JSON entry: {k}:{v}"
+                    )
+
+                result[src] = tgt
+
+            return result
+
+        if isinstance(parsed, list):
+            result = {}
+            for item in parsed:
+                if not isinstance(item, dict):
+                    raise ValueError(
+                        f"Invalid column_mapping JSON list item: {item}"
+                    )
+
+                if "source" not in item or "target" not in item:
+                    raise ValueError(
+                        f"Invalid column_mapping JSON list item: {item}"
+                    )
+
+                src = str(item["source"]).strip()
+                tgt = str(item["target"]).strip()
+
+                if not src or not tgt:
+                    raise ValueError(
+                        f"Invalid column_mapping JSON list item: {item}"
+                    )
+
+                result[src] = tgt
+
+            return result
+
+    except json.JSONDecodeError:
+        pass
+
+    result = {}
+
+    for pair in raw_mapping.split(","):
+        pair = pair.strip()
+        if not pair:
+            continue
+
+        if ":" in pair:
+            src, tgt = pair.split(":", 1)
+        elif "=" in pair:
+            src, tgt = pair.split("=", 1)
+        else:
+            raise ValueError(
+                f"Invalid column_mapping format: {raw_mapping}"
+            )
+
+        src = src.strip()
+        tgt = tgt.strip()
+
+        if not src or not tgt:
+            raise ValueError(
+                f"Invalid column_mapping pair: {pair}"
+            )
+
+        result[src] = tgt
+
+    return result
+
+
+def parse_input_params(raw_input_param: str | None) -> dict[str, str]:
+    if raw_input_param is None:
+        return {}
+
+    raw_input_param = raw_input_param.strip()
+    if not raw_input_param:
+        return {}
+
+    try:
+        parsed = json.loads(raw_input_param)
+    except json.JSONDecodeError as e:
+        raise ValueError(f"Invalid input_param JSON: {raw_input_param}") from e
+
+    if not isinstance(parsed, dict):
+        raise ValueError(
+            f"input_param must be JSON object(dict): {raw_input_param}"
+        )
+
+    result = {}
+    for k, v in parsed.items():
+        key = str(k).strip()
+        val = "" if v is None else str(v)
+
+        if not key:
+            raise ValueError(f"Invalid input_param key: {k}")
+
+        result[key] = val
+
+    return result
+
+
+def parse_config_option(raw_config_option: str | None) -> dict[str, str]:
+    if raw_config_option is None:
+        return {}
+
+    raw_config_option = raw_config_option.strip()
+    if not raw_config_option:
+        return {}
+
+    try:
+        parsed = json.loads(raw_config_option)
+    except json.JSONDecodeError as e:
+        raise ValueError(
+            f"Invalid config_option JSON: {raw_config_option}"
+        ) from e
+
+    if not isinstance(parsed, dict):
+        raise ValueError(
+            f"config_option must be JSON object(dict): {raw_config_option}"
+        )
+
+    result = {}
+    for k, v in parsed.items():
+        key = str(k).strip()
+        val = "" if v is None else str(v).strip()
+
+        if not key:
+            raise ValueError(f"Invalid config_option key: {k}")
+
+        result[key] = val
+
+    return result
+
+
+def apply_input_params(sql_text: str | None, input_params: dict[str, str]) -> str:
+    if sql_text is None:
+        return ""
+
+    result = sql_text.strip()
+    if not result:
+        return ""
+
+    if not input_params:
+        return result
+
+    for key in sorted(input_params.keys(), key=len, reverse=True):
+        result = result.replace(key, input_params[key])
+
+    return result
+
+
+def build_limit_0_sql(source_exec_sql: str) -> str:
+    return f"""
+        SELECT *
+        FROM (
+            {source_exec_sql}
+        ) q
+        LIMIT 0
+    """
+
+
 def get_single_table_config(
     dag_id: str,
     task_name: str,
