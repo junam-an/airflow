@@ -14,9 +14,8 @@ from common.etl_hist_utils import (
 )
 
 
-META_POSTGRES_CONN_ID = "postgres_conn"
-CHUNK_SIZE = 5000
-
+DEFAULT_META_POSTGRES_CONN_ID = "postgres_conn"
+DEFAULT_CHUNK_SIZE = 5000
 
 
 def parse_csv_columns(raw_value: str | None) -> list[str]:
@@ -203,14 +202,53 @@ def build_limit_0_sql(source_exec_sql: str) -> str:
 def get_single_table_config(
     dag_id: str,
     task_name: str,
-    meta_postgres_conn_id: str = META_POSTGRES_CONN_ID,
+    meta_postgres_conn_id: str = DEFAULT_META_POSTGRES_CONN_ID,
 ) -> dict:
     """
-    dag_id + task_name 기준으로 ETL 메타 1건만 조회한다.
-    dynamic expand용 list가 아니라 static task용 dict 1건을 반환한다.
-    """
+    dag_id + task_name 기준으로 etl_meta_db_to_db에서 1건만 조회한다.
 
+    기존 dynamic mapping 방식처럼 dag_id 전체 task 목록을 반환하지 않고,
+    static task 1개가 자기 task_name에 해당하는 설정 1건만 가져온다.
+    """
     meta_hook = PostgresHook(postgres_conn_id=meta_postgres_conn_id)
+
+    meta_hook.run("SET TIME ZONE 'Asia/Seoul'")
+
+    insert_etl_param_sql = """
+    INSERT INTO ETL_PARAM
+    WITH BASE_PARAM AS
+    (
+    SELECT
+    YESTERDAY_DT AS P_BASE_DT
+    , YESTERDAY_DT AS P_START_DT
+    , YESTERDAY_DT AS P_END_DT
+    , BEF_MAX_DAY AS P_BEF_MAX_DT
+    , MAX_DAY AS P_MAX_DT
+    FROM ETL_CALENDAR
+    WHERE 1=1
+    AND TODAY_DT = TO_CHAR(TIMEZONE('ASIA/SEOUL', CURRENT_DATE)::TIMESTAMP, 'YYYYMMDD')
+    )
+    SELECT
+    DAG_ID
+    , TASK_NAME
+    , '{"$$P_BASE_DT":"' || P_BASE_DT ||
+    '","$$P_START_DT":"' || P_START_DT ||
+    '","$$P_END_DT":"' || P_END_DT ||
+    '","$$P_START_TM":"' || (INPUT_PARAM::JSON ->> '$$P_END_TM') ||
+    '","$$P_END_TM":"' || TO_CHAR(TIMEZONE('ASIA/SEOUL', NOW())::TIMESTAMP, 'YYYYMMDDHH24MISS') ||
+    '","$$P_BEF_MAX_DT":"' || P_BEF_MAX_DT ||
+    '","$$P_MAX_DT":"' || P_MAX_DT ||
+    '"}' AS TOBE_PARAM
+    , A.INPUT_PARAM AS ASIS_PARAM
+    , TIMEZONE('ASIA/SEOUL', NOW())::TIMESTAMP AS CREATED_TM
+    , 'AIRFLOW' AS CREATE_USER_ID
+    FROM ETL_META_DB_TO_DB A, BASE_PARAM B
+    WHERE 1=1
+    AND DAG_ID = %s
+    AND TASK_NAME = %s
+    AND DISABLE_DT = '20991231'
+    AND ENABLE_YN = 'Y'
+    """
 
     update_input_param_sql = """
     UPDATE etl_meta_db_to_db a
@@ -252,7 +290,8 @@ def get_single_table_config(
         config_option,
         input_param
     FROM etl_meta_db_to_db
-    WHERE enable_yn = 'Y'
+    WHERE 1=1
+      AND enable_yn = 'Y'
       AND dag_id = %s
       AND task_name = %s
       AND disable_dt = '20991231'
@@ -266,7 +305,8 @@ def get_single_table_config(
         conn.autocommit = False
         cursor = conn.cursor()
 
-        cursor.execute("SET TIME ZONE 'Asia/Seoul'")
+        cursor.execute(insert_etl_param_sql, (dag_id, task_name))
+        conn.commit()
 
         cursor.execute(update_input_param_sql, (dag_id, task_name))
         cursor.execute(select_meta_sql, (dag_id, task_name))
@@ -292,7 +332,8 @@ def get_single_table_config(
 
     if len(rows) > 1:
         raise ValueError(
-            f"ETL meta must be unique. dag_id={dag_id}, task_name={task_name}, count={len(rows)}"
+            f"ETL meta must be unique. dag_id={dag_id}, "
+            f"task_name={task_name}, count={len(rows)}"
         )
 
     r = rows[0]
@@ -318,18 +359,20 @@ def get_single_table_config(
     if not target_table:
         raise ValueError("etl_meta.target_table is empty")
 
-    if not source_exec_sql:
-        raise ValueError(f"{target_table}: source_exec_sql is empty")
-
     if load_option not in ("ui", "di", "ti", "i", "u", "d"):
         raise ValueError(
-            f"{target_table}: invalid load_option [{load_option}]"
+            f"{target_table}: invalid load_option [{load_option}]. "
+            f"Allowed values are ui, di, ti, i, u, d."
         )
 
     if stg_drop_yn not in ("Y", "N"):
         raise ValueError(
-            f"{target_table}: invalid stg_drop_yn [{stg_drop_yn}]"
+            f"{target_table}: invalid stg_drop_yn [{stg_drop_yn}]. "
+            f"Allowed values are Y, N."
         )
+
+    if not source_exec_sql:
+        raise ValueError(f"{target_table}: source_exec_sql is empty")
 
     if load_option in ("ui", "di", "u", "d") and not pk_columns:
         raise ValueError(
@@ -337,14 +380,8 @@ def get_single_table_config(
         )
 
     parsed_config_option = parse_config_option(config_option)
-
-    source_conn_name = (
-        parsed_config_option.get("SOURCE_CONN_NAME") or ""
-    ).strip()
-
-    target_conn_name = (
-        parsed_config_option.get("TARGET_CONN_NAME") or ""
-    ).strip()
+    source_conn_name = (parsed_config_option.get("SOURCE_CONN_NAME") or "").strip()
+    target_conn_name = (parsed_config_option.get("TARGET_CONN_NAME") or "").strip()
 
     if not source_conn_name:
         raise ValueError(
@@ -378,15 +415,16 @@ def get_single_table_config(
 def run_postgres_to_postgres_etl(
     dag_id: str,
     task_name: str,
-    meta_postgres_conn_id: str = META_POSTGRES_CONN_ID,
-    chunk_size: int = CHUNK_SIZE,
+    meta_postgres_conn_id: str = DEFAULT_META_POSTGRES_CONN_ID,
+    chunk_size: int = DEFAULT_CHUNK_SIZE,
     **context,
 ):
     """
-    static task에서 직접 호출되는 실제 ETL 공통 함수.
-    dag_id + task_name 기준으로 메타 1건 조회 후 ETL 수행.
-    """
+    static task에서 호출하는 실제 ETL 공통 함수.
 
+    dag_id + task_name 기준으로 메타 1건을 조회한 뒤,
+    해당 설정만 PostgreSQL -> PostgreSQL ETL로 수행한다.
+    """
     runtime_info = get_task_runtime_info(**context)
 
     table_config = get_single_table_config(
@@ -430,7 +468,34 @@ def run_postgres_to_postgres_etl(
     file_write_row_count = 0
     target_file_path = ""
 
+    if not target_table:
+        raise ValueError("table_config.target_table is empty")
+
+    if not raw_source_exec_sql:
+        raise ValueError(f"{target_table}: source_exec_sql is empty")
+
+    if load_option not in ("ui", "di", "ti", "i", "u", "d"):
+        raise ValueError(f"{target_table}: invalid load_option [{load_option}]")
+
+    if stg_drop_yn not in ("Y", "N"):
+        raise ValueError(f"{target_table}: invalid stg_drop_yn [{stg_drop_yn}]")
+
+    if load_option in ("ui", "di", "u", "d") and not pk_columns:
+        raise ValueError(
+            f"{target_table}: pk_columns is required for load_option [{load_option}]"
+        )
+
     try:
+        if not source_conn_name:
+            raise ValueError(
+                f"{target_table}: config_option.SOURCE_CONN_NAME is empty"
+            )
+
+        if not target_conn_name:
+            raise ValueError(
+                f"{target_table}: config_option.TARGET_CONN_NAME is empty"
+            )
+
         run_hist_id = insert_etl_run_hist(
             dag_id=dag_id,
             run_id=runtime_info["run_id"],
@@ -452,20 +517,14 @@ def run_postgres_to_postgres_etl(
 
         input_params = parse_input_params(raw_input_param)
 
-        source_exec_sql = apply_input_params(
-            raw_source_exec_sql,
-            input_params,
-        )
+        source_exec_sql = apply_input_params(raw_source_exec_sql, input_params)
+        target_pre_sql = apply_input_params(raw_target_pre_sql, input_params)
+        target_post_sql = apply_input_params(raw_target_post_sql, input_params)
 
-        target_pre_sql = apply_input_params(
-            raw_target_pre_sql,
-            input_params,
-        )
-
-        target_post_sql = apply_input_params(
-            raw_target_post_sql,
-            input_params,
-        )
+        if not source_exec_sql:
+            raise ValueError(
+                f"{target_table}: source_exec_sql is empty after param replacement"
+            )
 
         stg_table = f"stg_{target_table}"
 
@@ -484,6 +543,7 @@ def run_postgres_to_postgres_etl(
         source_conn = None
         meta_cursor = None
         source_cursor = None
+
         target_tx_conn = None
         target_tx_cursor = None
 
@@ -509,7 +569,8 @@ def run_postgres_to_postgres_etl(
 
             if not source_columns:
                 raise ValueError(
-                    f"{target_table}: source_exec_sql returned no columns."
+                    f"{target_table}: source_exec_sql returned no columns. "
+                    f"source_exec_sql=[{source_exec_sql}]"
                 )
 
             column_mapping = parse_column_mapping(raw_column_mapping) or {}
@@ -519,26 +580,26 @@ def run_postgres_to_postgres_etl(
                 for src_col in source_columns
             ]
 
+            if not target_columns:
+                raise ValueError(f"{target_table}: mapped target_columns is empty")
+
             if len(set(target_columns)) != len(target_columns):
                 raise ValueError(
                     f"{target_table}: duplicate target columns detected after mapping. "
                     f"source_columns={source_columns}, target_columns={target_columns}"
                 )
 
-            missing_pk_columns = [
-                pk for pk in pk_columns if pk not in target_columns
-            ]
-
+            missing_pk_columns = [pk for pk in pk_columns if pk not in target_columns]
             if missing_pk_columns:
                 raise ValueError(
                     f"{target_table}: mapped result does not include PK columns: "
-                    f"{missing_pk_columns}"
+                    f"{missing_pk_columns}. "
+                    f"source_columns={source_columns}, "
+                    f"target_columns={target_columns}"
                 )
 
             insert_columns_sql = ", ".join(target_columns)
-            select_columns_sql = ", ".join(
-                [f"s.{col}" for col in target_columns]
-            )
+            select_columns_sql = ", ".join([f"s.{col}" for col in target_columns])
 
             insert_sql = f"""
                 INSERT INTO {target_table} ({insert_columns_sql})
@@ -550,9 +611,7 @@ def run_postgres_to_postgres_etl(
                 [f"t.{pk} = s.{pk}" for pk in pk_columns]
             )
 
-            non_pk_columns = [
-                c for c in target_columns if c not in pk_columns
-            ]
+            non_pk_columns = [c for c in target_columns if c not in pk_columns]
 
             if non_pk_columns:
                 update_set_sql = ", ".join(
@@ -618,7 +677,9 @@ def run_postgres_to_postgres_etl(
                     f"task_name={meta_task_name}, "
                     f"exec_seq={exec_seq}, "
                     f"{source_table or '[source_sql]'} -> {stg_table} "
-                    f"chunk={len(rows)} total={stg_load_row_count}"
+                    f"chunk={len(rows)} total={stg_load_row_count} "
+                    f"source_columns={source_columns} "
+                    f"target_columns={target_columns}"
                 )
 
             if stg_load_row_count > 0:
@@ -639,7 +700,9 @@ def run_postgres_to_postgres_etl(
 
                         target_tx_cursor.execute(insert_not_exists_sql)
                         target_insert_count = target_tx_cursor.rowcount
-                        print(f"{target_table} INSERT completed (UI)")
+                        print(
+                            f"{stg_table} -> {target_table} INSERT completed (UI)"
+                        )
 
                     elif load_option == "di":
                         target_tx_cursor.execute(delete_sql)
@@ -648,7 +711,9 @@ def run_postgres_to_postgres_etl(
 
                         target_tx_cursor.execute(insert_sql)
                         target_insert_count = target_tx_cursor.rowcount
-                        print(f"{target_table} INSERT completed (DI)")
+                        print(
+                            f"{stg_table} -> {target_table} INSERT completed (DI)"
+                        )
 
                     elif load_option == "ti":
                         target_tx_cursor.execute(truncate_target_sql)
@@ -656,22 +721,26 @@ def run_postgres_to_postgres_etl(
 
                         target_tx_cursor.execute(insert_sql)
                         target_insert_count = target_tx_cursor.rowcount
-                        print(f"{target_table} INSERT completed (TI)")
+                        print(
+                            f"{stg_table} -> {target_table} INSERT completed (TI)"
+                        )
 
                     elif load_option == "i":
                         target_tx_cursor.execute(insert_sql)
                         target_insert_count = target_tx_cursor.rowcount
-                        print(f"{target_table} INSERT completed (I)")
+                        print(
+                            f"{stg_table} -> {target_table} INSERT completed (I)"
+                        )
 
                     elif load_option == "u":
-                        if update_sql:
+                        if not update_sql:
+                            print(
+                                f"{target_table}: no non-pk columns to update, UPDATE skipped (U)"
+                            )
+                        else:
                             target_tx_cursor.execute(update_sql)
                             target_update_count = target_tx_cursor.rowcount
                             print(f"{target_table} UPDATE completed (U)")
-                        else:
-                            print(
-                                f"{target_table}: no non-pk columns to update, UPDATE skipped"
-                            )
 
                     elif load_option == "d":
                         target_tx_cursor.execute(delete_sql)
@@ -711,7 +780,7 @@ def run_postgres_to_postgres_etl(
 
             if job_succeeded and stg_drop_yn == "Y":
                 target_hook.run(drop_stg_sql)
-                print(f"{stg_table} dropped")
+                print(f"{stg_table} dropped (stg_drop_yn=Y)")
             else:
                 print(
                     f"{stg_table} kept "
@@ -763,24 +832,20 @@ def run_postgres_to_postgres_etl(
         raise
 
 
-def create_postgres_to_postgres_task(
+def create_postgres_to_postgres_static_task(
     dag_id: str,
     task_name: str,
     task_id: str | None = None,
-    meta_postgres_conn_id: str = META_POSTGRES_CONN_ID,
-    chunk_size: int = CHUNK_SIZE,
+    meta_postgres_conn_id: str = DEFAULT_META_POSTGRES_CONN_ID,
+    chunk_size: int = DEFAULT_CHUNK_SIZE,
 ):
     """
-    static Airflow task 생성 함수.
+    static Airflow task 생성 helper.
 
-    task_name:
-        etl_meta_db_to_db.task_name 값
-
-    task_id:
-        Airflow UI에 표시될 task_id.
-        생략하면 task_name을 그대로 사용한다.
+    이 helper를 사용하면 DAG 파일에서 task_id를 고정된 이름으로 만들 수 있다.
+    Airflow UI에는 run_etl[0] 같은 dynamic mapped task가 아니라
+    task_id 값이 그대로 표시된다.
     """
-
     airflow_task_id = task_id or task_name
 
     @task(task_id=airflow_task_id)

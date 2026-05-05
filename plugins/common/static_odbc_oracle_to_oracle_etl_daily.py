@@ -2,8 +2,10 @@ from __future__ import annotations
 
 import json
 import traceback
+import re
 
 from airflow.decorators import task
+from airflow.providers.odbc.hooks.odbc import OdbcHook
 from airflow.providers.postgres.hooks.postgres import PostgresHook
 
 from common.etl_hist_utils import (
@@ -14,9 +16,8 @@ from common.etl_hist_utils import (
 )
 
 
-META_POSTGRES_CONN_ID = "postgres_conn"
-CHUNK_SIZE = 5000
-
+DEFAULT_META_POSTGRES_CONN_ID = "postgres_conn"
+DEFAULT_CHUNK_SIZE = 5000
 
 
 def parse_csv_columns(raw_value: str | None) -> list[str]:
@@ -31,6 +32,7 @@ def parse_column_mapping(raw_mapping: str | None) -> dict[str, str]:
         return {}
 
     raw_mapping = raw_mapping.strip()
+
     if not raw_mapping:
         return {}
 
@@ -39,6 +41,7 @@ def parse_column_mapping(raw_mapping: str | None) -> dict[str, str]:
 
         if isinstance(parsed, dict):
             result = {}
+
             for k, v in parsed.items():
                 src = str(k).strip()
                 tgt = str(v).strip()
@@ -54,6 +57,7 @@ def parse_column_mapping(raw_mapping: str | None) -> dict[str, str]:
 
         if isinstance(parsed, list):
             result = {}
+
             for item in parsed:
                 if not isinstance(item, dict):
                     raise ValueError(
@@ -84,6 +88,7 @@ def parse_column_mapping(raw_mapping: str | None) -> dict[str, str]:
 
     for pair in raw_mapping.split(","):
         pair = pair.strip()
+
         if not pair:
             continue
 
@@ -114,6 +119,7 @@ def parse_input_params(raw_input_param: str | None) -> dict[str, str]:
         return {}
 
     raw_input_param = raw_input_param.strip()
+
     if not raw_input_param:
         return {}
 
@@ -128,6 +134,7 @@ def parse_input_params(raw_input_param: str | None) -> dict[str, str]:
         )
 
     result = {}
+
     for k, v in parsed.items():
         key = str(k).strip()
         val = "" if v is None else str(v)
@@ -145,6 +152,7 @@ def parse_config_option(raw_config_option: str | None) -> dict[str, str]:
         return {}
 
     raw_config_option = raw_config_option.strip()
+
     if not raw_config_option:
         return {}
 
@@ -161,6 +169,7 @@ def parse_config_option(raw_config_option: str | None) -> dict[str, str]:
         )
 
     result = {}
+
     for k, v in parsed.items():
         key = str(k).strip()
         val = "" if v is None else str(v).strip()
@@ -178,6 +187,7 @@ def apply_input_params(sql_text: str | None, input_params: dict[str, str]) -> st
         return ""
 
     result = sql_text.strip()
+
     if not result:
         return ""
 
@@ -196,18 +206,177 @@ def build_limit_0_sql(source_exec_sql: str) -> str:
         FROM (
             {source_exec_sql}
         ) q
-        LIMIT 0
+        WHERE 1 = 0
     """
 
 
-def get_single_table_config(
+def build_create_stg_pk_sql(
+    stg_table: str,
+    pk_columns: list[str],
+) -> str | None:
+    if not pk_columns:
+        return None
+
+    pk_columns_sql = ", ".join(pk_columns)
+    pk_name = f"PK_{stg_table.upper()}"[:30]
+
+    return f"""
+        ALTER TABLE {stg_table}
+        ADD CONSTRAINT {pk_name}
+        PRIMARY KEY ({pk_columns_sql})
+    """
+
+
+def build_insert_sql(
+    target_table: str,
+    stg_table: str,
+    target_columns: list[str],
+) -> str:
+    insert_columns_sql = ", ".join(target_columns)
+    select_columns_sql = ", ".join([f"s.{col}" for col in target_columns])
+
+    return f"""
+        INSERT INTO {target_table} ({insert_columns_sql})
+        SELECT {select_columns_sql}
+        FROM {stg_table} s
+    """
+
+
+def build_delete_sql(
+    target_table: str,
+    stg_table: str,
+    pk_columns: list[str],
+) -> str:
+    pk_join_condition_sql = " AND ".join(
+        [f"t.{pk} = s.{pk}" for pk in pk_columns]
+    )
+
+    return f"""
+        DELETE FROM {target_table} t
+        WHERE EXISTS (
+            SELECT 1
+            FROM {stg_table} s
+            WHERE {pk_join_condition_sql}
+        )
+    """
+
+
+def build_merge_ui_sql(
+    target_table: str,
+    stg_table: str,
+    target_columns: list[str],
+    pk_columns: list[str],
+) -> str:
+    pk_join_condition_sql = " AND ".join(
+        [f"t.{pk} = s.{pk}" for pk in pk_columns]
+    )
+
+    non_pk_columns = [c for c in target_columns if c not in pk_columns]
+
+    update_clause = ""
+    if non_pk_columns:
+        update_set_sql = ", ".join(
+            [f"t.{col} = s.{col}" for col in non_pk_columns]
+        )
+        update_clause = f"WHEN MATCHED THEN UPDATE SET {update_set_sql}"
+
+    insert_columns_sql = ", ".join(target_columns)
+    insert_values_sql = ", ".join([f"s.{col}" for col in target_columns])
+
+    return f"""
+        MERGE INTO {target_table} t
+        USING {stg_table} s
+           ON ({pk_join_condition_sql})
+        {update_clause}
+        WHEN NOT MATCHED THEN
+             INSERT ({insert_columns_sql})
+             VALUES ({insert_values_sql})
+    """
+
+
+def build_merge_update_sql(
+    target_table: str,
+    stg_table: str,
+    target_columns: list[str],
+    pk_columns: list[str],
+) -> str | None:
+    non_pk_columns = [c for c in target_columns if c not in pk_columns]
+
+    if not non_pk_columns:
+        return None
+
+    pk_join_condition_sql = " AND ".join(
+        [f"t.{pk} = s.{pk}" for pk in pk_columns]
+    )
+    update_set_sql = ", ".join(
+        [f"t.{col} = s.{col}" for col in non_pk_columns]
+    )
+
+    return f"""
+        MERGE INTO {target_table} t
+        USING {stg_table} s
+           ON ({pk_join_condition_sql})
+        WHEN MATCHED THEN
+             UPDATE SET {update_set_sql}
+    """
+
+
+def build_stg_insert_sql(
+    stg_table: str,
+    target_columns: list[str],
+) -> str:
+    columns_sql = ", ".join(target_columns)
+    bind_sql = ", ".join(["?"] * len(target_columns))
+
+    return f"""
+        INSERT INTO {stg_table} ({columns_sql})
+        VALUES ({bind_sql})
+    """
+
+
+def normalize_rows_for_odbc(
+    rows: list[tuple],
+    column_count: int,
+) -> list[tuple]:
+    normalized = []
+
+    for row in rows:
+        if row is None:
+            continue
+
+        new_row = tuple(row)
+
+        if len(new_row) != column_count:
+            raise ValueError(
+                f"Row column count mismatch. "
+                f"expected={column_count}, actual={len(new_row)}, row={new_row}"
+            )
+
+        normalized.append(new_row)
+
+    return normalized
+
+
+def normalize_airflow_task_id(value: str) -> str:
+    """
+    Airflow task_id 허용 문자:
+    영문, 숫자, _, -, .
+    """
+    task_id = re.sub(r"[^a-zA-Z0-9_.-]", "_", value.strip())
+
+    if not task_id:
+        raise ValueError("airflow task_id is empty")
+
+    return task_id
+
+
+def get_odbc_to_odbc_task_config(
     dag_id: str,
     task_name: str,
-    meta_postgres_conn_id: str = META_POSTGRES_CONN_ID,
+    meta_postgres_conn_id: str = DEFAULT_META_POSTGRES_CONN_ID,
 ) -> dict:
     """
-    dag_id + task_name 기준으로 ETL 메타 1건만 조회한다.
-    dynamic expand용 list가 아니라 static task용 dict 1건을 반환한다.
+    dag_id + task_name 기준으로 etl_meta_db_to_db 1건만 조회한다.
     """
 
     meta_hook = PostgresHook(postgres_conn_id=meta_postgres_conn_id)
@@ -252,7 +421,8 @@ def get_single_table_config(
         config_option,
         input_param
     FROM etl_meta_db_to_db
-    WHERE enable_yn = 'Y'
+    WHERE 1=1
+      AND enable_yn = 'Y'
       AND dag_id = %s
       AND task_name = %s
       AND disable_dt = '20991231'
@@ -270,6 +440,7 @@ def get_single_table_config(
 
         cursor.execute(update_input_param_sql, (dag_id, task_name))
         cursor.execute(select_meta_sql, (dag_id, task_name))
+
         rows = cursor.fetchall()
 
         conn.commit()
@@ -282,68 +453,84 @@ def get_single_table_config(
     finally:
         if cursor is not None:
             cursor.close()
+
         if conn is not None:
             conn.close()
 
     if not rows:
         raise ValueError(
-            f"ETL meta not found. dag_id={dag_id}, task_name={task_name}"
+            f"etl_meta_db_to_db config not found. "
+            f"dag_id={dag_id}, task_name={task_name}"
         )
 
     if len(rows) > 1:
         raise ValueError(
-            f"ETL meta must be unique. dag_id={dag_id}, task_name={task_name}, count={len(rows)}"
+            f"etl_meta_db_to_db config must be one row. "
+            f"dag_id={dag_id}, task_name={task_name}, count={len(rows)}"
         )
 
     r = rows[0]
 
-    meta_task_name = (r[0] or "").strip() if r[0] is not None else ""
+    meta_task_name = (r[0] or "").strip()
     exec_seq = int(r[1]) if r[1] is not None else 999999
-
-    source_table = (r[2] or "").strip() if r[2] is not None else ""
-    target_table = (r[3] or "").strip() if r[3] is not None else ""
+    source_table = (r[2] or "").strip()
+    target_table = (r[3] or "").strip()
     pk_columns = parse_csv_columns(r[4])
-    source_exec_sql = (r[5] or "").strip() if r[5] is not None else ""
+    source_exec_sql = (r[5] or "").strip()
     column_mapping = r[6]
-    load_option = (r[7] or "di").strip().lower() if r[7] is not None else "di"
-    stg_drop_yn = (r[8] or "N").strip().upper() if r[8] is not None else "N"
-    target_pre_sql = (r[9] or "").strip() if r[9] is not None else ""
-    target_post_sql = (r[10] or "").strip() if r[10] is not None else ""
-    config_option = (r[11] or "").strip() if r[11] is not None else ""
-    input_param = (r[12] or "").strip() if r[12] is not None else ""
+
+    load_option = (
+        (r[7] or "di").strip().lower()
+        if r[7] is not None
+        else "di"
+    )
+
+    stg_drop_yn = (
+        (r[8] or "N").strip().upper()
+        if r[8] is not None
+        else "N"
+    )
+
+    target_pre_sql = (r[9] or "").strip()
+    target_post_sql = (r[10] or "").strip()
+    config_option = (r[11] or "").strip()
+    input_param = (r[12] or "").strip()
 
     if not meta_task_name:
         meta_task_name = task_name
 
     if not target_table:
-        raise ValueError("etl_meta.target_table is empty")
-
-    if not source_exec_sql:
-        raise ValueError(f"{target_table}: source_exec_sql is empty")
+        raise ValueError(f"{task_name}: target_table is empty")
 
     if load_option not in ("ui", "di", "ti", "i", "u", "d"):
         raise ValueError(
-            f"{target_table}: invalid load_option [{load_option}]"
+            f"{target_table}: invalid load_option [{load_option}]. "
+            f"Allowed values are ui, di, ti, i, u, d."
         )
 
     if stg_drop_yn not in ("Y", "N"):
         raise ValueError(
-            f"{target_table}: invalid stg_drop_yn [{stg_drop_yn}]"
+            f"{target_table}: invalid stg_drop_yn [{stg_drop_yn}]. "
+            f"Allowed values are Y, N."
         )
+
+    if not source_exec_sql:
+        raise ValueError(f"{target_table}: source_exec_sql is empty")
 
     if load_option in ("ui", "di", "u", "d") and not pk_columns:
         raise ValueError(
-            f"{target_table}: pk_column is required for load_option [{load_option}]"
+            f"{target_table}: pk_column is required for "
+            f"load_option [{load_option}]"
         )
 
-    parsed_config_option = parse_config_option(config_option)
+    parsed_config = parse_config_option(config_option)
 
     source_conn_name = (
-        parsed_config_option.get("SOURCE_CONN_NAME") or ""
+        parsed_config.get("SOURCE_CONN_NAME") or ""
     ).strip()
 
     target_conn_name = (
-        parsed_config_option.get("TARGET_CONN_NAME") or ""
+        parsed_config.get("TARGET_CONN_NAME") or ""
     ).strip()
 
     if not source_conn_name:
@@ -368,38 +555,47 @@ def get_single_table_config(
         "stg_drop_yn": stg_drop_yn,
         "target_pre_sql": target_pre_sql,
         "target_post_sql": target_post_sql,
-        "config_option": parsed_config_option,
+        "config_option": parsed_config,
         "input_param": input_param,
-        "source_conn_name": source_conn_name,
-        "target_conn_name": target_conn_name,
     }
 
 
-def run_postgres_to_postgres_etl(
+def run_odbc_to_odbc_common(
     dag_id: str,
     task_name: str,
-    meta_postgres_conn_id: str = META_POSTGRES_CONN_ID,
-    chunk_size: int = CHUNK_SIZE,
+    meta_postgres_conn_id: str = DEFAULT_META_POSTGRES_CONN_ID,
+    chunk_size: int = DEFAULT_CHUNK_SIZE,
     **context,
-):
+) -> None:
     """
-    static task에서 직접 호출되는 실제 ETL 공통 함수.
-    dag_id + task_name 기준으로 메타 1건 조회 후 ETL 수행.
+    실제 DB -> DB ETL 공통 실행 함수.
+    Airflow task가 아니라 순수 Python 공통 함수다.
     """
 
-    runtime_info = get_task_runtime_info(**context)
-
-    table_config = get_single_table_config(
+    table_config = get_odbc_to_odbc_task_config(
         dag_id=dag_id,
         task_name=task_name,
         meta_postgres_conn_id=meta_postgres_conn_id,
     )
+
+    runtime_info = get_task_runtime_info(**context)
 
     meta_task_name = (table_config.get("task_name") or "").strip()
     exec_seq = table_config.get("exec_seq")
 
     source_table = (table_config.get("source_table") or "").strip()
     target_table = (table_config.get("target_table") or "").strip()
+
+    print(
+        f"START ETL "
+        f"dag_id={dag_id}, "
+        f"task_name={meta_task_name}, "
+        f"airflow_task_id={runtime_info['task_id']}, "
+        f"exec_seq={exec_seq}, "
+        f"source_table={source_table}, "
+        f"target_table={target_table}"
+    )
+
     pk_columns = table_config.get("pk_columns") or []
     raw_source_exec_sql = (table_config.get("source_exec_sql") or "").strip()
     raw_column_mapping = table_config.get("column_mapping")
@@ -407,19 +603,8 @@ def run_postgres_to_postgres_etl(
     stg_drop_yn = (table_config.get("stg_drop_yn") or "N").strip().upper()
     raw_target_pre_sql = (table_config.get("target_pre_sql") or "").strip()
     raw_target_post_sql = (table_config.get("target_post_sql") or "").strip()
-    config_option = table_config.get("config_option") or {}
     raw_input_param = table_config.get("input_param")
-    source_conn_name = (table_config.get("source_conn_name") or "").strip()
-    target_conn_name = (table_config.get("target_conn_name") or "").strip()
-
-    print(
-        f"START ETL "
-        f"dag_id={dag_id}, "
-        f"task_name={meta_task_name}, "
-        f"exec_seq={exec_seq}, "
-        f"source_table={source_table}, "
-        f"target_table={target_table}"
-    )
+    config_option = table_config.get("config_option") or {}
 
     run_hist_id = None
     extract_row_count = 0
@@ -430,12 +615,48 @@ def run_postgres_to_postgres_etl(
     file_write_row_count = 0
     target_file_path = ""
 
+    if not target_table:
+        raise ValueError("table_config.target_table is empty")
+
+    if not raw_source_exec_sql:
+        raise ValueError(f"{target_table}: source_exec_sql is empty")
+
+    if load_option not in ("ui", "di", "ti", "i", "u", "d"):
+        raise ValueError(
+            f"{target_table}: invalid load_option [{load_option}]"
+        )
+
+    if stg_drop_yn not in ("Y", "N"):
+        raise ValueError(
+            f"{target_table}: invalid stg_drop_yn [{stg_drop_yn}]"
+        )
+
+    if load_option in ("ui", "di", "u", "d") and not pk_columns:
+        raise ValueError(
+            f"{target_table}: pk_columns is required for "
+            f"load_option [{load_option}]"
+        )
+
+    source_conn_name = str(
+        config_option.get("SOURCE_CONN_NAME") or ""
+    ).strip()
+
+    target_conn_name = str(
+        config_option.get("TARGET_CONN_NAME") or ""
+    ).strip()
+
+    if not source_conn_name:
+        raise ValueError(f"{target_table}: SOURCE_CONN_NAME is empty")
+
+    if not target_conn_name:
+        raise ValueError(f"{target_table}: TARGET_CONN_NAME is empty")
+
     try:
         run_hist_id = insert_etl_run_hist(
             dag_id=dag_id,
             run_id=runtime_info["run_id"],
             task_id=meta_task_name or runtime_info["task_id"],
-            map_index=runtime_info["map_index"],
+            map_index=runtime_info.get("map_index", -1),
             source_table=source_table,
             target_table=target_table,
             load_option=load_option,
@@ -467,31 +688,67 @@ def run_postgres_to_postgres_etl(
             input_params,
         )
 
-        stg_table = f"stg_{target_table}"
+        if not source_exec_sql:
+            raise ValueError(
+                f"{target_table}: "
+                f"source_exec_sql is empty after param replacement"
+            )
+
+        stg_table = f"STG_{target_table}"
+
+        drop_stg_sql = f"DROP TABLE {stg_table}"
 
         create_stg_sql = f"""
-            CREATE TABLE IF NOT EXISTS {stg_table}
-            (LIKE {target_table} INCLUDING ALL)
+            CREATE TABLE {stg_table}
+            AS
+            SELECT *
+            FROM {target_table}
+            WHERE 1 = 0
         """
 
-        truncate_stg_sql = f"TRUNCATE TABLE {stg_table}"
-        truncate_target_sql = f"TRUNCATE TABLE {target_table}"
-        drop_stg_sql = f"DROP TABLE IF EXISTS {stg_table}"
+        create_stg_pk_sql = build_create_stg_pk_sql(
+            stg_table=stg_table,
+            pk_columns=pk_columns,
+        )
 
-        source_hook = PostgresHook(postgres_conn_id=source_conn_name)
-        target_hook = PostgresHook(postgres_conn_id=target_conn_name)
+        truncate_target_sql = f"TRUNCATE TABLE {target_table}"
+
+        source_hook = OdbcHook(odbc_conn_id=source_conn_name)
+        target_hook = OdbcHook(odbc_conn_id=target_conn_name)
 
         source_conn = None
         meta_cursor = None
         source_cursor = None
+
+        target_stg_conn = None
+        target_stg_cursor = None
+
         target_tx_conn = None
         target_tx_cursor = None
 
         job_succeeded = False
 
         try:
+            try:
+                target_hook.run(drop_stg_sql)
+                print(f"{stg_table} dropped before recreate")
+            except Exception:
+                print(
+                    f"{stg_table} drop skipped "
+                    f"(not exists or drop failed before recreate)"
+                )
+
             target_hook.run(create_stg_sql)
-            target_hook.run(truncate_stg_sql)
+            print(f"{stg_table} created")
+
+            if create_stg_pk_sql:
+                target_hook.run(create_stg_pk_sql)
+                print(f"{stg_table} primary key created: {pk_columns}")
+            else:
+                print(
+                    f"{stg_table} primary key creation skipped "
+                    f"(no pk_columns)"
+                )
 
             source_conn = source_hook.get_conn()
 
@@ -501,15 +758,19 @@ def run_postgres_to_postgres_etl(
 
             if meta_cursor.description is None:
                 raise ValueError(
-                    f"{target_table}: source_exec_sql did not return a result set. "
-                    f"Only SELECT query is allowed. source_exec_sql=[{source_exec_sql}]"
+                    f"{target_table}: "
+                    f"source_exec_sql did not return a result set. "
+                    f"Only SELECT query is allowed. "
+                    f"source_exec_sql=[{source_exec_sql}]"
                 )
 
             source_columns = [desc[0] for desc in meta_cursor.description]
 
             if not source_columns:
                 raise ValueError(
-                    f"{target_table}: source_exec_sql returned no columns."
+                    f"{target_table}: "
+                    f"source_exec_sql returned no columns. "
+                    f"source_exec_sql=[{source_exec_sql}]"
                 )
 
             column_mapping = parse_column_mapping(raw_column_mapping) or {}
@@ -519,10 +780,17 @@ def run_postgres_to_postgres_etl(
                 for src_col in source_columns
             ]
 
+            if not target_columns:
+                raise ValueError(
+                    f"{target_table}: mapped target_columns is empty"
+                )
+
             if len(set(target_columns)) != len(target_columns):
                 raise ValueError(
-                    f"{target_table}: duplicate target columns detected after mapping. "
-                    f"source_columns={source_columns}, target_columns={target_columns}"
+                    f"{target_table}: "
+                    f"duplicate target columns detected after mapping. "
+                    f"source_columns={source_columns}, "
+                    f"target_columns={target_columns}"
                 )
 
             missing_pk_columns = [
@@ -531,95 +799,96 @@ def run_postgres_to_postgres_etl(
 
             if missing_pk_columns:
                 raise ValueError(
-                    f"{target_table}: mapped result does not include PK columns: "
-                    f"{missing_pk_columns}"
+                    f"{target_table}: mapped result does not include "
+                    f"PK columns: {missing_pk_columns}. "
+                    f"source_columns={source_columns}, "
+                    f"target_columns={target_columns}"
                 )
 
-            insert_columns_sql = ", ".join(target_columns)
-            select_columns_sql = ", ".join(
-                [f"s.{col}" for col in target_columns]
+            insert_sql = build_insert_sql(
+                target_table=target_table,
+                stg_table=stg_table,
+                target_columns=target_columns,
             )
 
-            insert_sql = f"""
-                INSERT INTO {target_table} ({insert_columns_sql})
-                SELECT {select_columns_sql}
-                FROM {stg_table} s
-            """
-
-            pk_join_condition_sql = " AND ".join(
-                [f"t.{pk} = s.{pk}" for pk in pk_columns]
+            delete_sql = build_delete_sql(
+                target_table=target_table,
+                stg_table=stg_table,
+                pk_columns=pk_columns,
             )
 
-            non_pk_columns = [
-                c for c in target_columns if c not in pk_columns
-            ]
-
-            if non_pk_columns:
-                update_set_sql = ", ".join(
-                    [f"{col} = s.{col}" for col in non_pk_columns]
-                )
-
-                update_sql = f"""
-                    UPDATE {target_table} t
-                    SET {update_set_sql}
-                    FROM {stg_table} s
-                    WHERE {pk_join_condition_sql}
-                """
-            else:
-                update_sql = None
-
-            not_exists_condition_sql = " AND ".join(
-                [f"t.{pk} = s.{pk}" for pk in pk_columns]
+            merge_ui_sql = build_merge_ui_sql(
+                target_table=target_table,
+                stg_table=stg_table,
+                target_columns=target_columns,
+                pk_columns=pk_columns,
             )
 
-            insert_not_exists_sql = f"""
-                INSERT INTO {target_table} ({insert_columns_sql})
-                SELECT {select_columns_sql}
-                FROM {stg_table} s
-                WHERE NOT EXISTS (
-                    SELECT 1
-                    FROM {target_table} t
-                    WHERE {not_exists_condition_sql}
-                )
-            """
+            merge_update_sql = build_merge_update_sql(
+                target_table=target_table,
+                stg_table=stg_table,
+                target_columns=target_columns,
+                pk_columns=pk_columns,
+            )
 
-            delete_sql = f"""
-                DELETE FROM {target_table} t
-                WHERE EXISTS (
-                    SELECT 1
-                    FROM {stg_table} s
-                    WHERE {pk_join_condition_sql}
-                )
-            """
+            stg_insert_sql = build_stg_insert_sql(
+                stg_table=stg_table,
+                target_columns=target_columns,
+            )
 
-            source_cursor = source_conn.cursor(name=f"csr_{target_table}")
-            source_cursor.itersize = chunk_size
+            target_stg_conn = target_hook.get_conn()
+            target_stg_conn.autocommit = False
+            target_stg_cursor = target_stg_conn.cursor()
+
+            try:
+                target_stg_cursor.fast_executemany = True
+            except Exception:
+                pass
+
+            source_cursor = source_conn.cursor()
+            source_cursor.arraysize = chunk_size
             source_cursor.execute(source_exec_sql)
 
             while True:
-                rows = source_cursor.fetchmany(size=chunk_size)
+                rows = source_cursor.fetchmany(chunk_size)
 
                 if not rows:
                     break
 
-                target_hook.insert_rows(
-                    table=stg_table,
+                normalized_rows = normalize_rows_for_odbc(
                     rows=rows,
-                    target_fields=target_columns,
-                    commit_every=chunk_size,
-                    executemany=True,
+                    column_count=len(target_columns),
                 )
 
-                extract_row_count += len(rows)
-                stg_load_row_count += len(rows)
+                if not normalized_rows:
+                    continue
+
+                target_stg_cursor.executemany(
+                    stg_insert_sql,
+                    normalized_rows,
+                )
+
+                target_stg_conn.commit()
+
+                extract_row_count += len(normalized_rows)
+                stg_load_row_count += len(normalized_rows)
 
                 print(
                     f"dag_id={dag_id}, "
                     f"task_name={meta_task_name}, "
+                    f"airflow_task_id={runtime_info['task_id']}, "
                     f"exec_seq={exec_seq}, "
                     f"{source_table or '[source_sql]'} -> {stg_table} "
-                    f"chunk={len(rows)} total={stg_load_row_count}"
+                    f"chunk={len(normalized_rows)} "
+                    f"total={stg_load_row_count} "
+                    f"source_columns={source_columns} "
+                    f"target_columns={target_columns}"
                 )
+
+            target_stg_cursor.close()
+            target_stg_cursor = None
+            target_stg_conn.close()
+            target_stg_conn = None
 
             if stg_load_row_count > 0:
                 target_tx_conn = target_hook.get_conn()
@@ -632,14 +901,12 @@ def run_postgres_to_postgres_etl(
                         print(f"{target_table} target_pre_sql completed")
 
                     if load_option == "ui":
-                        if update_sql:
-                            target_tx_cursor.execute(update_sql)
-                            target_update_count = target_tx_cursor.rowcount
-                            print(f"{target_table} UPDATE completed")
-
-                        target_tx_cursor.execute(insert_not_exists_sql)
-                        target_insert_count = target_tx_cursor.rowcount
-                        print(f"{target_table} INSERT completed (UI)")
+                        target_tx_cursor.execute(merge_ui_sql)
+                        print(
+                            f"{stg_table} -> {target_table} "
+                            f"MERGE completed (UI), "
+                            f"total={stg_load_row_count}"
+                        )
 
                     elif load_option == "di":
                         target_tx_cursor.execute(delete_sql)
@@ -648,7 +915,11 @@ def run_postgres_to_postgres_etl(
 
                         target_tx_cursor.execute(insert_sql)
                         target_insert_count = target_tx_cursor.rowcount
-                        print(f"{target_table} INSERT completed (DI)")
+                        print(
+                            f"{stg_table} -> {target_table} "
+                            f"INSERT completed (DI), "
+                            f"total={stg_load_row_count}"
+                        )
 
                     elif load_option == "ti":
                         target_tx_cursor.execute(truncate_target_sql)
@@ -656,21 +927,33 @@ def run_postgres_to_postgres_etl(
 
                         target_tx_cursor.execute(insert_sql)
                         target_insert_count = target_tx_cursor.rowcount
-                        print(f"{target_table} INSERT completed (TI)")
+                        print(
+                            f"{stg_table} -> {target_table} "
+                            f"INSERT completed (TI), "
+                            f"total={stg_load_row_count}"
+                        )
 
                     elif load_option == "i":
                         target_tx_cursor.execute(insert_sql)
                         target_insert_count = target_tx_cursor.rowcount
-                        print(f"{target_table} INSERT completed (I)")
+                        print(
+                            f"{stg_table} -> {target_table} "
+                            f"INSERT completed (I), "
+                            f"total={stg_load_row_count}"
+                        )
 
                     elif load_option == "u":
-                        if update_sql:
-                            target_tx_cursor.execute(update_sql)
-                            target_update_count = target_tx_cursor.rowcount
-                            print(f"{target_table} UPDATE completed (U)")
-                        else:
+                        if not merge_update_sql:
                             print(
-                                f"{target_table}: no non-pk columns to update, UPDATE skipped"
+                                f"{target_table}: "
+                                f"no non-pk columns to update, "
+                                f"UPDATE skipped (U)"
+                            )
+                        else:
+                            target_tx_cursor.execute(merge_update_sql)
+                            target_update_count = target_tx_cursor.rowcount
+                            print(
+                                f"{target_table} MERGE UPDATE completed (U)"
                             )
 
                     elif load_option == "d":
@@ -703,6 +986,12 @@ def run_postgres_to_postgres_etl(
             if source_conn is not None:
                 source_conn.close()
 
+            if target_stg_cursor is not None:
+                target_stg_cursor.close()
+
+            if target_stg_conn is not None:
+                target_stg_conn.close()
+
             if target_tx_cursor is not None:
                 target_tx_cursor.close()
 
@@ -710,12 +999,16 @@ def run_postgres_to_postgres_etl(
                 target_tx_conn.close()
 
             if job_succeeded and stg_drop_yn == "Y":
-                target_hook.run(drop_stg_sql)
-                print(f"{stg_table} dropped")
+                try:
+                    target_hook.run(drop_stg_sql)
+                    print(f"{stg_table} dropped (stg_drop_yn=Y)")
+                except Exception:
+                    print(f"{stg_table} drop failed after success")
             else:
                 print(
                     f"{stg_table} kept "
-                    f"(job_succeeded={job_succeeded}, stg_drop_yn={stg_drop_yn})"
+                    f"(job_succeeded={job_succeeded}, "
+                    f"stg_drop_yn={stg_drop_yn})"
                 )
 
         update_etl_run_hist_success(
@@ -733,6 +1026,7 @@ def run_postgres_to_postgres_etl(
             f"END ETL SUCCESS "
             f"dag_id={dag_id}, "
             f"task_name={meta_task_name}, "
+            f"airflow_task_id={runtime_info['task_id']}, "
             f"exec_seq={exec_seq}, "
             f"source_table={source_table}, "
             f"target_table={target_table}"
@@ -742,7 +1036,9 @@ def run_postgres_to_postgres_etl(
         print(
             f"END ETL FAILED "
             f"dag_id={dag_id}, "
-            f"task_name={task_name}, "
+            f"task_name={meta_task_name}, "
+            f"airflow_task_id={runtime_info['task_id']}, "
+            f"exec_seq={exec_seq}, "
             f"source_table={source_table}, "
             f"target_table={target_table}"
         )
@@ -763,29 +1059,28 @@ def run_postgres_to_postgres_etl(
         raise
 
 
-def create_postgres_to_postgres_task(
+def create_odbc_to_odbc_meta_task(
     dag_id: str,
     task_name: str,
-    task_id: str | None = None,
-    meta_postgres_conn_id: str = META_POSTGRES_CONN_ID,
-    chunk_size: int = CHUNK_SIZE,
+    meta_postgres_conn_id: str = DEFAULT_META_POSTGRES_CONN_ID,
+    chunk_size: int = DEFAULT_CHUNK_SIZE,
+    airflow_task_id: str | None = None,
+    pool_slots: int = 1,
 ):
     """
-    static Airflow task 생성 함수.
+    ODBC DB -> DB Meta ETL static task 생성 함수.
 
-    task_name:
-        etl_meta_db_to_db.task_name 값
-
-    task_id:
-        Airflow UI에 표시될 task_id.
-        생략하면 task_name을 그대로 사용한다.
+    dynamic expand 사용 안 함.
+    dag_id + task_name 기준으로 공통 ETL 수행.
     """
 
-    airflow_task_id = task_id or task_name
+    static_task_id = normalize_airflow_task_id(
+        airflow_task_id or task_name
+    )
 
-    @task(task_id=airflow_task_id)
-    def _static_etl_task(**context):
-        return run_postgres_to_postgres_etl(
+    @task(task_id=static_task_id, pool_slots=pool_slots)
+    def _run_static_etl(**context):
+        run_odbc_to_odbc_common(
             dag_id=dag_id,
             task_name=task_name,
             meta_postgres_conn_id=meta_postgres_conn_id,
@@ -793,4 +1088,4 @@ def create_postgres_to_postgres_task(
             **context,
         )
 
-    return _static_etl_task()
+    return _run_static_etl()
