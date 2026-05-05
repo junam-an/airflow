@@ -1008,7 +1008,7 @@ def create_file_to_postgres_task(
 
     @task(task_id=airflow_task_id)
     def _static_etl_task(**context):
-        return run_file_to_postgres_etl(
+        run_file_to_postgres_etl(
             dag_id=dag_id,
             task_name=task_name,
             meta_postgres_conn_id=meta_postgres_conn_id,
