@@ -937,6 +937,7 @@ def run_postgres_to_file_etl(
     source_conn_name = (
         table_config.get("source_conn_name") or ""
     ).strip()
+    encryption_columns = table_config.get("encryption_columns") or []
 
     print(
         f"START ETL "
