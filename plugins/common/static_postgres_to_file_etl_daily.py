@@ -1,6 +1,7 @@
 ﻿from __future__ import annotations
 
 import argparse
+import base64
 import csv
 import json
 import os
@@ -511,6 +512,93 @@ def apply_input_params_for_file(
     return result
 
 
+def parse_encryption_columns(raw_columns: str | None) -> list[str]:
+    if raw_columns is None:
+        return []
+
+    raw_columns = str(raw_columns).strip()
+    if not raw_columns:
+        return []
+
+    return [
+        col.strip()
+        for col in raw_columns.split(",")
+        if col.strip()
+    ]
+
+
+def simple_encrypt_value(value) -> str:
+    if value is None:
+        return ""
+
+    text = str(value)
+    if not text:
+        return ""
+
+    key = b"temporary-test-key"
+    data = text.encode("utf-8")
+    encrypted = bytes(
+        byte ^ key[idx % len(key)]
+        for idx, byte in enumerate(data)
+    )
+    return "ENC$" + base64.urlsafe_b64encode(encrypted).decode("ascii")
+
+
+def find_column_index(columns: list[str], column_name: str) -> int | None:
+    normalized_column_name = column_name.strip().lower()
+    for idx, column in enumerate(columns):
+        if str(column).strip().lower() == normalized_column_name:
+            return idx
+    return None
+
+
+def resolve_encryption_column_indexes(
+    source_columns: list[str],
+    target_columns: list[str],
+    encryption_columns: list[str],
+) -> list[int]:
+    indexes = []
+    missing_columns = []
+
+    for column_name in encryption_columns:
+        idx = find_column_index(target_columns, column_name)
+        if idx is None:
+            idx = find_column_index(source_columns, column_name)
+
+        if idx is None:
+            missing_columns.append(column_name)
+            continue
+
+        if idx not in indexes:
+            indexes.append(idx)
+
+    if missing_columns:
+        raise ValueError(
+            f"ENCRYPTION_COL contains unknown columns. "
+            f"missing={missing_columns}, "
+            f"source_columns={source_columns}, "
+            f"target_columns={target_columns}"
+        )
+
+    return indexes
+
+
+def encrypt_row_values(
+    rows: list[tuple],
+    encryption_column_indexes: list[int],
+) -> list[tuple]:
+    if not encryption_column_indexes:
+        return rows
+
+    encrypted_rows = []
+    for row in rows:
+        values = list(row)
+        for idx in encryption_column_indexes:
+            values[idx] = simple_encrypt_value(values[idx])
+        encrypted_rows.append(tuple(values))
+
+    return encrypted_rows
+
 def normalize_csv_delimiter(raw_delimiter: str | None) -> str:
     if raw_delimiter is None:
         return ","
@@ -745,6 +833,9 @@ def get_single_table_config(
     source_conn_name = (
         parsed_config_option.get("SOURCE_CONN_NAME") or ""
     ).strip()
+    encryption_columns = parse_encryption_columns(
+        parsed_config_option.get("ENCRYPTION_COL")
+    )
 
     if not source_table:
         raise ValueError("etl_meta.source_table is empty")
@@ -794,6 +885,7 @@ def get_single_table_config(
         "config_option": parsed_config_option,
         "input_param": input_param,
         "source_conn_name": source_conn_name,
+        "encryption_columns": encryption_columns,
     }
 
 
@@ -956,6 +1048,7 @@ def run_postgres_to_file_etl(
         print(f"[DEBUG] target_file_dir={target_file_dir}")
         print(f"[DEBUG] full_target_file_path={full_target_file_path}")
         print(f"[DEBUG] target_file_type={target_file_type}")
+        print(f"[DEBUG] encryption_columns={encryption_columns}")
         print(f"[DEBUG] csv_file_delimiter_raw={csv_file_delimiter}")
         print(
             f"[DEBUG] csv_file_delimiter_normalized="
@@ -1050,6 +1143,26 @@ def run_postgres_to_file_etl(
 
             print(f"[DEBUG] source_columns={source_columns}")
             print(f"[DEBUG] target_columns={target_columns}")
+            encryption_column_indexes = []
+            rows_to_write = rows
+            if target_file_type == "csv" and encryption_columns:
+                encryption_column_indexes = resolve_encryption_column_indexes(
+                    source_columns=source_columns,
+                    target_columns=target_columns,
+                    encryption_columns=encryption_columns,
+                )
+                rows_to_write = encrypt_row_values(
+                    rows=rows_to_write,
+                    encryption_column_indexes=encryption_column_indexes,
+                )
+            elif target_file_type != "csv" and encryption_columns:
+                print(
+                    f"[WARN] ENCRYPTION_COL is ignored for "
+                    f"target_file_type={target_file_type}. "
+                    f"CSV only is supported. "
+                    f"encryption_columns={encryption_columns}"
+                )
+            print(f"[DEBUG] encryption_column_indexes={encryption_column_indexes}")
             print(f"[DEBUG] total_fetched_rows={len(rows)}")
             print(f"[DEBUG] sample_rows={rows[:5]}")
 
@@ -1057,7 +1170,7 @@ def run_postgres_to_file_etl(
                 write_csv_file(
                     file_path=full_target_file_path,
                     columns=target_columns,
-                    rows=rows,
+                    rows=rows_to_write,
                     delimiter=normalized_csv_file_delimiter,
                     encoding=normalized_target_file_encoding,
                 )
