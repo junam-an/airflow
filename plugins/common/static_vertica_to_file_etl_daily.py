@@ -47,7 +47,11 @@ try:
 except ImportError:
     redshift_connector = None
 
-
+# ****** standalone 방식으로 수행시 meta는 redshift 사용, airflow 방식으로 수행시 meta는 postgres 사용 *******
+# ****** meta 테이블의 config_option 컬럼 "SOURCE_CONN_NAME":"postgres_conn" 이면 export AIRFLOW_CONN_POSTGRES_CONN="postgresql://airflow:airflow@localhost:5431/airflow" 필요 ******
+# ****** meta 테이블의 config_option 컬럼 "SOURCE_CONN_NAME":"vertica_conn" 이면 export AIRFLOW_CONN_VERTICA_CONN="vertica://user:password@host:5433/database" 필요 *****
+# ****** standalone 방식 수행시 메타 db 접속정보로 export AIRFLOW_CONN_REDSHIFT_CONN="redshift://user:password@host:5439/database" 필요 ******
+# ****** airflow meta 정보는 webconsole 에서 provider "postgres_conn" 으로 커넥션 생성 ******
 DEFAULT_META_POSTGRES_CONN_ID = "postgres_conn"
 HIST_TABLE_NAME = "etl_job_run_dtl_hist"
 USE_AIRFLOW_HOOKS = True
