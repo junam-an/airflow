@@ -707,12 +707,51 @@ def get_single_table_config(
     dag_id: str,
     task_name: str,
     meta_postgres_conn_id: str = DEFAULT_META_POSTGRES_CONN_ID,
+    today_dt: str | None = None,
 ) -> dict:
     """
-    dag_id + task_name 湲곗??쇰줈 PostgreSQL -> File 硫뷀? 1嫄대쭔 議고쉶?쒕떎.
-    dynamic mapping??list媛 ?꾨땲??static task??dict 1嫄댁쓣 諛섑솚?쒕떎.
+    static task에서 직접 호출되는 실제 PostgreSQL -> File ETL 공통 함수.
+    dag_id + task_name 기준으로 메타 1건 조회 후 ETL 수행.
     """
     meta_hook = get_postgres_hook(meta_postgres_conn_id)
+
+    insert_etl_param_sql = """
+    INSERT INTO ETL_PARAM
+    WITH BASE_PARAM AS
+    (
+    SELECT
+    YESTERDAY_DT AS P_BASE_DT
+    , yyyy || mm || '01' AS P_START_DT
+    , YESTERDAY_DT AS P_END_DT
+    , BEF_MAX_DAY AS P_BEF_MAX_DT
+    , MAX_DAY AS P_MAX_DT
+    , yyyy || mm as P_BASE_YM
+    FROM ETL_CALENDAR
+    WHERE 1=1
+    AND TODAY_DT = %s
+    )
+    SELECT
+    DAG_ID
+    , TASK_NAME
+    , '{"$$P_BASE_DT":"' || P_BASE_DT ||
+    '","$$P_START_DT":"' || P_START_DT ||
+    '","$$P_END_DT":"' || P_END_DT ||
+    '","$$P_START_TM":"' || (INPUT_PARAM::JSON ->> '$$P_END_TM') ||
+    '","$$P_END_TM":"' || TO_CHAR(TIMEZONE('ASIA/SEOUL', NOW())::TIMESTAMP, 'YYYYMMDDHH24MISS') ||
+    '","$$P_BEF_MAX_DT":"' || P_BEF_MAX_DT ||
+    '","$$P_MAX_DT":"' || P_MAX_DT ||
+    '","$$P_BASE_YM":"' || P_BASE_YM ||
+    '"}' AS TOBE_PARAM
+    , A.INPUT_PARAM AS ASIS_PARAM
+    , TIMEZONE('ASIA/SEOUL', NOW())::TIMESTAMP AS CREATED_TM
+    , 'AIRFLOW' AS CREATE_USER_ID
+    FROM etl_meta_db_to_file A, BASE_PARAM B
+    WHERE 1=1
+    AND DAG_ID = %s
+    AND TASK_NAME = %s
+    AND DISABLE_DT = '20991231'
+    AND ENABLE_YN = 'Y'
+    """
 
     update_input_param_sql = """
     UPDATE etl_meta_db_to_file a
@@ -771,6 +810,9 @@ def get_single_table_config(
         cursor = conn.cursor()
 
         cursor.execute("SET TIME ZONE 'Asia/Seoul'")
+
+        if today_dt is not None:
+            cursor.execute(insert_etl_param_sql, (today_dt, dag_id, task_name))
 
         cursor.execute(update_input_param_sql, (dag_id, task_name))
         cursor.execute(select_meta_sql, (dag_id, task_name))
@@ -893,11 +935,12 @@ def run_postgres_to_file_etl(
     dag_id: str,
     task_name: str,
     meta_postgres_conn_id: str = DEFAULT_META_POSTGRES_CONN_ID,
+    today_dt: str | None = None,
     **context,
 ):
     """
-    static task?먯꽌 吏곸젒 ?몄텧?섎뒗 ?ㅼ젣 PostgreSQL -> File ETL 怨듯넻 ?⑥닔.
-    dag_id + task_name 湲곗??쇰줈 硫뷀? 1嫄?議고쉶 ??ETL ?섑뻾.
+    dag_id + task_name 기준으로 PostgreSQL -> File 메타 1건만 조회한다.
+    dynamic mapping용 list가 아니라 static task용 dict 1건을 반환한다.
     """
     runtime_info = get_task_runtime_info(**context)
 
@@ -905,6 +948,7 @@ def run_postgres_to_file_etl(
         dag_id=dag_id,
         task_name=task_name,
         meta_postgres_conn_id=meta_postgres_conn_id,
+        today_dt=today_dt,
     )
 
     meta_task_name = (table_config.get("task_name") or "").strip()
@@ -1275,6 +1319,7 @@ def create_postgres_to_file_task(
     task_name: str,
     task_id: str | None = None,
     meta_postgres_conn_id: str = DEFAULT_META_POSTGRES_CONN_ID,
+    today_dt: str | None = None,
 ):
     """
     static Airflow task ?앹꽦 ?⑥닔.
@@ -1300,6 +1345,7 @@ def create_postgres_to_file_task(
             dag_id=dag_id,
             task_name=task_name,
             meta_postgres_conn_id=meta_postgres_conn_id,
+            today_dt=today_dt,
             **context,
         )
 
@@ -1311,6 +1357,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--dag-id", required=True, help="etl_meta_db_to_file.dag_id")
     parser.add_argument("--task-name", required=True, help="etl_meta_db_to_file.task_name")
+    parser.add_argument("--today-dt", required=True, help="ETL_CALENDAR.TODAY_DT")
     parser.add_argument(
         "--meta-postgres-conn-id",
         default=DEFAULT_META_POSTGRES_CONN_ID,
@@ -1343,6 +1390,7 @@ def main(argv: list[str] | None = None) -> int:
         dag_id=args.dag_id,
         task_name=args.task_name,
         meta_postgres_conn_id=args.meta_postgres_conn_id,
+        today_dt=args.today_dt,
         run_id=args.run_id,
         task_id=args.task_id or args.task_name,
         map_index=args.map_index,
@@ -1352,4 +1400,5 @@ def main(argv: list[str] | None = None) -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
+
 
