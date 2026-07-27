@@ -1,382 +1,25 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
-import argparse
 import csv
 import json
-import os
 import subprocess
 import traceback
-import uuid
-from datetime import datetime
 from pathlib import Path
-from urllib.parse import parse_qs, unquote, urlparse
 
-try:
-    from airflow.decorators import task as airflow_task
-    from airflow.providers.postgres.hooks.postgres import (
-        PostgresHook as AirflowPostgresHook,
-    )
-except ImportError:
-    airflow_task = None
-    AirflowPostgresHook = None
+from airflow.decorators import task
+from airflow.providers.postgres.hooks.postgres import PostgresHook
 
-try:
-    import psycopg2
-except ImportError:
-    psycopg2 = None
+from common.etl_hist_utils import (
+    get_task_runtime_info,
+    insert_etl_run_hist,
+    update_etl_run_hist_success,
+    update_etl_run_hist_failed,
+)
 
 
 DEFAULT_META_POSTGRES_CONN_ID = "postgres_conn"
-HIST_TABLE_NAME = "etl_job_run_dtl_hist"
-USE_AIRFLOW_HOOKS = True
-# ****** standalone 전용 ******
-def build_airflow_conn_env_name(conn_id: str) -> str:
-    normalized = "".join(
-        ch if ch.isalnum() else "_"
-        for ch in conn_id.upper()
-    )
-    return f"AIRFLOW_CONN_{normalized}"
 
 
-# ****** standalone 전용 ******
-def parse_postgres_conn_uri(conn_id: str, uri: str) -> dict:
-    parsed = urlparse(uri)
-    if parsed.scheme not in ("postgres", "postgresql"):
-        raise ValueError(
-            f"{conn_id}: unsupported connection URI scheme "
-            f"[{parsed.scheme}]. Use postgres:// or postgresql://."
-        )
-
-    query = parse_qs(parsed.query)
-    conn_kwargs = {
-        "host": parsed.hostname,
-        "port": parsed.port or 5432,
-        "dbname": unquote(parsed.path.lstrip("/")),
-        "user": unquote(parsed.username or ""),
-        "password": unquote(parsed.password or ""),
-    }
-
-    for key, values in query.items():
-        if values:
-            conn_kwargs[key] = values[-1]
-
-    return {k: v for k, v in conn_kwargs.items() if v not in (None, "")}
-
-
-# ****** standalone 전용 ******
-def get_env_value(conn_id: str, suffix: str, default: str = "") -> str:
-    prefix = "".join(ch if ch.isalnum() else "_" for ch in conn_id.upper())
-    return os.getenv(f"{prefix}_{suffix}", default)
-
-
-# ****** standalone 전용 ******
-def build_postgres_conn_kwargs_from_env(conn_id: str) -> dict:
-    airflow_conn_uri = os.getenv(build_airflow_conn_env_name(conn_id))
-    if airflow_conn_uri:
-        return parse_postgres_conn_uri(conn_id, airflow_conn_uri)
-
-    kwargs = {
-        "host": get_env_value(conn_id, "HOST"),
-        "port": get_env_value(conn_id, "PORT", "5432"),
-        "dbname": (
-            get_env_value(conn_id, "DBNAME")
-            or get_env_value(conn_id, "DATABASE")
-        ),
-        "user": get_env_value(conn_id, "USER"),
-        "password": get_env_value(conn_id, "PASSWORD"),
-    }
-
-    extra_raw = get_env_value(conn_id, "EXTRA")
-    if extra_raw:
-        extra = json.loads(extra_raw)
-        if not isinstance(extra, dict):
-            raise ValueError(f"{conn_id}_EXTRA must be JSON object")
-        kwargs.update(extra)
-
-    missing = [key for key in ("host", "dbname", "user") if not kwargs.get(key)]
-    if missing:
-        env_name = build_airflow_conn_env_name(conn_id)
-        raise ValueError(
-            f"Postgres connection [{conn_id}] is not configured. "
-            f"Set {env_name}=postgresql://user:password@host:5432/dbname "
-            f"or set {conn_id.upper()}_HOST, _DBNAME, _USER, _PASSWORD. "
-            f"Missing: {missing}"
-        )
-
-    return {k: v for k, v in kwargs.items() if v not in (None, "")}
-
-
-# ****** standalone 전용 ******
-class StandalonePostgresHook:
-    def __init__(self, postgres_conn_id: str):
-        self.postgres_conn_id = postgres_conn_id
-
-    def get_conn(self):
-        if psycopg2 is None:
-            raise ImportError(
-                "psycopg2 is required for standalone Python execution. "
-                "Install it with: pip install psycopg2-binary"
-            )
-        return psycopg2.connect(
-            **build_postgres_conn_kwargs_from_env(self.postgres_conn_id)
-        )
-
-    def run(self, sql: str, parameters=None) -> None:
-        conn = None
-        cursor = None
-        try:
-            conn = self.get_conn()
-            conn.autocommit = False
-            cursor = conn.cursor()
-            cursor.execute(sql, parameters)
-            conn.commit()
-        except Exception:
-            if conn is not None:
-                conn.rollback()
-            raise
-        finally:
-            if cursor is not None:
-                cursor.close()
-            if conn is not None:
-                conn.close()
-
-    def get_first(self, sql: str, parameters=None):
-        conn = None
-        cursor = None
-        try:
-            conn = self.get_conn()
-            cursor = conn.cursor()
-            cursor.execute(sql, parameters)
-            return cursor.fetchone()
-        finally:
-            if cursor is not None:
-                cursor.close()
-            if conn is not None:
-                conn.close()
-
-    def insert_rows(
-        self,
-        table: str,
-        rows: list[tuple],
-        target_fields: list[str] | None = None,
-        commit_every: int = 1000,
-        executemany: bool = False,
-    ) -> None:
-        if not rows:
-            return
-
-        fields_sql = ""
-        if target_fields:
-            fields_sql = " (" + ", ".join(target_fields) + ")"
-
-        placeholders = ", ".join(["%s"] * len(rows[0]))
-        insert_sql = f"INSERT INTO {table}{fields_sql} VALUES ({placeholders})"
-
-        conn = None
-        cursor = None
-        try:
-            conn = self.get_conn()
-            conn.autocommit = False
-            cursor = conn.cursor()
-            if executemany:
-                cursor.executemany(insert_sql, rows)
-            else:
-                for row in rows:
-                    cursor.execute(insert_sql, row)
-            conn.commit()
-        except Exception:
-            if conn is not None:
-                conn.rollback()
-            raise
-        finally:
-            if cursor is not None:
-                cursor.close()
-            if conn is not None:
-                conn.close()
-
-
-# ****** standalone + airflow 전용 ******
-def get_postgres_hook(postgres_conn_id: str):
-    if USE_AIRFLOW_HOOKS and AirflowPostgresHook is not None:
-        return AirflowPostgresHook(postgres_conn_id=postgres_conn_id)
-    return StandalonePostgresHook(postgres_conn_id=postgres_conn_id)
-
-
-# ****** standalone + airflow 전용 ******
-def safe_json_dumps(value) -> str:
-    if value is None:
-        return ""
-    if isinstance(value, str):
-        return value
-    return json.dumps(value, ensure_ascii=False, default=str)
-
-
-# ****** standalone + airflow 전용 ******
-def cut_text(value: str | None, max_length: int = 4000) -> str:
-    if value is None:
-        return ""
-    text = str(value)
-    if len(text) <= max_length:
-        return text
-    return text[:max_length]
-
-
-# ****** standalone + airflow 전용 ******
-def get_task_runtime_info(**context) -> dict:
-    ti = context.get("ti")
-    task = context.get("task")
-    task_id = context.get("task_id") or getattr(task, "task_id", "standalone_task")
-    run_id = context.get("run_id") or f"manual__{datetime.now():%Y%m%dT%H%M%S}__{uuid.uuid4().hex[:8]}"
-
-    return {
-        "run_id": run_id,
-        "task_id": task_id,
-        "map_index": context.get("map_index", getattr(ti, "map_index", -1)),
-    }
-
-
-# ****** standalone + airflow 전용 ******
-def insert_etl_run_hist(
-    dag_id: str,
-    run_id: str | None,
-    task_id: str | None,
-    map_index: int | None,
-    source_table: str | None,
-    target_table: str | None,
-    load_option: str | None = None,
-    source_conn_name: str | None = None,
-    target_conn_name: str | None = None,
-    input_param=None,
-    config_option=None,
-    create_user_id: str = "python",
-    meta_conn_id: str = DEFAULT_META_POSTGRES_CONN_ID,
-) -> int:
-    hook = get_postgres_hook(meta_conn_id)
-    insert_sql = f"""
-        INSERT INTO {HIST_TABLE_NAME} (
-            dag_id, run_id, task_id, map_index, source_table, target_table,
-            load_option, source_conn_name, target_conn_name,
-            extract_row_count, stg_load_row_count, target_insert_count,
-            target_update_count, target_delete_count,
-            target_total_affected_count, file_write_row_count,
-            target_file_path, status, error_message, start_tm, end_tm,
-            input_param, config_option, create_user_id, create_tm, update_tm
-        )
-        VALUES (
-            %s, %s, %s, %s, %s, %s, %s, %s, %s,
-            0, 0, 0, 0, 0, 0, 0, '',
-            'RUNNING', '', NOW(), NULL,
-            %s, %s, %s, NOW(), NOW()
-        )
-        RETURNING run_hist_id
-    """
-
-    conn = None
-    cursor = None
-    try:
-        conn = hook.get_conn()
-        conn.autocommit = False
-        cursor = conn.cursor()
-        cursor.execute(
-            insert_sql,
-            (
-                dag_id, run_id, task_id, map_index, source_table or "",
-                target_table or "", load_option or "", source_conn_name or "",
-                target_conn_name or "", safe_json_dumps(input_param),
-                safe_json_dumps(config_option), create_user_id,
-            ),
-        )
-        run_hist_id = cursor.fetchone()[0]
-        conn.commit()
-        return run_hist_id
-    except Exception:
-        if conn is not None:
-            conn.rollback()
-        raise
-    finally:
-        if cursor is not None:
-            cursor.close()
-        if conn is not None:
-            conn.close()
-
-
-# ****** standalone + airflow 전용 ******
-def update_etl_run_hist_success(
-    run_hist_id: int,
-    extract_row_count: int = 0,
-    stg_load_row_count: int = 0,
-    target_insert_count: int = 0,
-    target_update_count: int = 0,
-    target_delete_count: int = 0,
-    file_write_row_count: int = 0,
-    target_file_path: str | None = None,
-    meta_conn_id: str = DEFAULT_META_POSTGRES_CONN_ID,
-) -> None:
-    hook = get_postgres_hook(meta_conn_id)
-    total_affected = int(target_insert_count) + int(target_update_count) + int(target_delete_count)
-    update_sql = f"""
-        UPDATE {HIST_TABLE_NAME}
-           SET extract_row_count = %s,
-               stg_load_row_count = %s,
-               target_insert_count = %s,
-               target_update_count = %s,
-               target_delete_count = %s,
-               target_total_affected_count = %s,
-               file_write_row_count = %s,
-               target_file_path = %s,
-               status = 'SUCCESS',
-               error_message = '',
-               end_tm = NOW(),
-               update_tm = NOW()
-         WHERE run_hist_id = %s
-    """
-    hook.run(update_sql, parameters=(
-        extract_row_count, stg_load_row_count, target_insert_count,
-        target_update_count, target_delete_count, total_affected,
-        file_write_row_count, target_file_path or "", run_hist_id,
-    ))
-
-
-# ****** standalone + airflow 전용 ******
-def update_etl_run_hist_failed(
-    run_hist_id: int,
-    error_message: str,
-    extract_row_count: int = 0,
-    stg_load_row_count: int = 0,
-    target_insert_count: int = 0,
-    target_update_count: int = 0,
-    target_delete_count: int = 0,
-    file_write_row_count: int = 0,
-    target_file_path: str | None = None,
-    meta_conn_id: str = DEFAULT_META_POSTGRES_CONN_ID,
-) -> None:
-    hook = get_postgres_hook(meta_conn_id)
-    total_affected = int(target_insert_count) + int(target_update_count) + int(target_delete_count)
-    update_sql = f"""
-        UPDATE {HIST_TABLE_NAME}
-           SET extract_row_count = %s,
-               stg_load_row_count = %s,
-               target_insert_count = %s,
-               target_update_count = %s,
-               target_delete_count = %s,
-               target_total_affected_count = %s,
-               file_write_row_count = %s,
-               target_file_path = %s,
-               status = 'FAILED',
-               error_message = %s,
-               end_tm = NOW(),
-               update_tm = NOW()
-         WHERE run_hist_id = %s
-    """
-    hook.run(update_sql, parameters=(
-        extract_row_count, stg_load_row_count, target_insert_count,
-        target_update_count, target_delete_count, total_affected,
-        file_write_row_count, target_file_path or "", cut_text(error_message, 4000),
-        run_hist_id,
-    ))
-
-
-# ****** standalone + airflow 전용 ******
 def parse_csv_columns(raw_value: str | None) -> list[str]:
     if raw_value is None:
         return []
@@ -384,7 +27,6 @@ def parse_csv_columns(raw_value: str | None) -> list[str]:
     return [c.strip() for c in raw_value.split(",") if c and c.strip()]
 
 
-# ****** standalone + airflow 전용 ******
 def parse_column_mapping(raw_mapping: str | None) -> dict[str, str]:
     if raw_mapping is None:
         return {}
@@ -472,7 +114,6 @@ def parse_column_mapping(raw_mapping: str | None) -> dict[str, str]:
     return result
 
 
-# ****** standalone + airflow 전용 ******
 def parse_input_params(raw_input_param: str | None) -> dict[str, str]:
     if raw_input_param is None:
         return {}
@@ -506,7 +147,6 @@ def parse_input_params(raw_input_param: str | None) -> dict[str, str]:
     return result
 
 
-# ****** standalone + airflow 전용 ******
 def parse_config_option(raw_config_option: str | None) -> dict[str, str]:
     if raw_config_option is None:
         return {}
@@ -542,7 +182,6 @@ def parse_config_option(raw_config_option: str | None) -> dict[str, str]:
     return result
 
 
-# ****** standalone + airflow 전용 ******
 def apply_input_params(text: str | None, input_params: dict[str, str]) -> str:
     if text is None:
         return ""
@@ -561,7 +200,6 @@ def apply_input_params(text: str | None, input_params: dict[str, str]) -> str:
     return result
 
 
-# ****** standalone + airflow 전용 ******
 def normalize_csv_delimiter(raw_delimiter: str | None) -> str:
     if raw_delimiter is None:
         return ","
@@ -577,7 +215,6 @@ def normalize_csv_delimiter(raw_delimiter: str | None) -> str:
     return delimiter
 
 
-# ****** standalone + airflow 전용 ******
 def normalize_file_encoding(raw_encoding: str | None) -> str:
     if raw_encoding is None:
         return "utf-8"
@@ -602,7 +239,6 @@ def normalize_file_encoding(raw_encoding: str | None) -> str:
     )
 
 
-# ****** standalone + airflow 전용 ******
 def read_file_all_rows(
     file_path: str,
     file_type: str,
@@ -711,56 +347,17 @@ def read_file_all_rows(
     )
 
 
-# ****** standalone + airflow 전용 ******
 def get_single_table_config(
     dag_id: str,
     task_name: str,
     meta_postgres_conn_id: str = DEFAULT_META_POSTGRES_CONN_ID,
-    today_dt: str | None = None,
 ) -> dict:
     """
-    dag_id + task_name 湲곗??쇰줈 etl_meta_file_to_db 硫뷀? 1嫄대쭔 議고쉶?쒕떎.
-    dynamic expand??list媛 ?꾨땲??static task??dict 1嫄댁쓣 諛섑솚?쒕떎.
+    dag_id + task_name 기준으로 etl_meta_file_to_db 메타 1건만 조회한다.
+    dynamic expand용 list가 아니라 static task용 dict 1건을 반환한다.
     """
-    meta_hook = get_postgres_hook(meta_postgres_conn_id)
+    meta_hook = PostgresHook(postgres_conn_id=meta_postgres_conn_id)
 
-    insert_etl_param_sql = """
-    INSERT INTO ETL_PARAM
-    WITH BASE_PARAM AS
-    (
-    SELECT
-    YESTERDAY_DT AS P_BASE_DT
-    , yyyy || mm || '01' AS P_START_DT
-    , YESTERDAY_DT AS P_END_DT
-    , BEF_MAX_DAY AS P_BEF_MAX_DT
-    , MAX_DAY AS P_MAX_DT
-    , yyyy || mm as P_BASE_YM
-    FROM ETL_CALENDAR
-    WHERE 1=1
-    AND TODAY_DT = %s
-    )
-    SELECT
-    DAG_ID
-    , TASK_NAME
-    , '{"$$P_BASE_DT":"' || P_BASE_DT ||
-    '","$$P_START_DT":"' || P_START_DT ||
-    '","$$P_END_DT":"' || P_END_DT ||
-    '","$$P_START_TM":"' || (INPUT_PARAM::JSON ->> '$$P_END_TM') ||
-    '","$$P_END_TM":"' || TO_CHAR(TIMEZONE('ASIA/SEOUL', NOW())::TIMESTAMP, 'YYYYMMDDHH24MISS') ||
-    '","$$P_BEF_MAX_DT":"' || P_BEF_MAX_DT ||
-    '","$$P_MAX_DT":"' || P_MAX_DT ||
-    '","$$P_BASE_YM":"' || P_BASE_YM ||
-    '"}' AS TOBE_PARAM
-    , A.INPUT_PARAM AS ASIS_PARAM
-    , TIMEZONE('ASIA/SEOUL', NOW())::TIMESTAMP AS CREATED_TM
-    , 'AIRFLOW' AS CREATE_USER_ID
-    FROM etl_meta_file_to_db A, BASE_PARAM B
-    WHERE 1=1
-    AND DAG_ID = %s
-    AND TASK_NAME = %s
-    AND DISABLE_DT = '20991231'
-    AND ENABLE_YN = 'Y'
-    """
     update_input_param_sql = """
     UPDATE etl_meta_file_to_db a
     SET input_param = b.tobe_param
@@ -822,9 +419,6 @@ def get_single_table_config(
 
         cursor.execute("SET TIME ZONE 'Asia/Seoul'")
 
-
-        if today_dt is not None:
-            cursor.execute(insert_etl_param_sql, (today_dt, dag_id, task_name))
 
         cursor.execute(update_input_param_sql, (dag_id, task_name))
         cursor.execute(select_meta_sql, (dag_id, task_name))
@@ -940,17 +534,15 @@ def get_single_table_config(
     }
 
 
-# ****** standalone + airflow 전용 ******
 def run_file_to_postgres_etl(
     dag_id: str,
     task_name: str,
     meta_postgres_conn_id: str = DEFAULT_META_POSTGRES_CONN_ID,
-    today_dt: str | None = None,
     **context,
 ):
     """
-    static task?먯꽌 吏곸젒 ?몄텧?섎뒗 File -> PostgreSQL ETL 怨듯넻 ?⑥닔.
-    dag_id + task_name 湲곗??쇰줈 硫뷀? 1嫄?議고쉶 ??ETL ?섑뻾.
+    static task에서 직접 호출되는 File -> PostgreSQL ETL 공통 함수.
+    dag_id + task_name 기준으로 메타 1건 조회 후 ETL 수행.
     """
     runtime_info = get_task_runtime_info(**context)
 
@@ -958,7 +550,6 @@ def run_file_to_postgres_etl(
         dag_id=dag_id,
         task_name=task_name,
         meta_postgres_conn_id=meta_postgres_conn_id,
-        today_dt=today_dt,
     )
 
     meta_task_name = (table_config.get("task_name") or "").strip()
@@ -1022,7 +613,6 @@ def run_file_to_postgres_etl(
                 "TASK_NAME": meta_task_name,
                 "EXEC_SEQ": str(exec_seq),
             },
-            meta_conn_id=meta_postgres_conn_id,
         )
 
         input_params = parse_input_params(raw_input_param)
@@ -1079,7 +669,7 @@ def run_file_to_postgres_etl(
         truncate_target_sql = f"TRUNCATE TABLE {target_table}"
         drop_stg_sql = f"DROP TABLE IF EXISTS {stg_table}"
 
-        target_hook = get_postgres_hook(target_conn_name)
+        target_hook = PostgresHook(postgres_conn_id=target_conn_name)
 
         target_tx_conn = None
         target_tx_cursor = None
@@ -1367,7 +957,6 @@ def run_file_to_postgres_etl(
             target_delete_count=target_delete_count,
             file_write_row_count=file_write_row_count,
             target_file_path=target_file_path,
-            meta_conn_id=meta_postgres_conn_id,
         )
 
         print(
@@ -1399,97 +988,36 @@ def run_file_to_postgres_etl(
                 target_delete_count=target_delete_count,
                 file_write_row_count=file_write_row_count,
                 target_file_path=target_file_path,
-                meta_conn_id=meta_postgres_conn_id,
             )
 
         raise
 
 
-# ****** airflow 전용 ******
 def create_file_to_postgres_task(
     dag_id: str,
     task_name: str,
     task_id: str | None = None,
     meta_postgres_conn_id: str = DEFAULT_META_POSTGRES_CONN_ID,
-    today_dt: str | None = None,
 ):
     """
-    static Airflow task ?앹꽦 ?⑥닔.
+    static Airflow task 생성 함수.
 
     task_name:
-        etl_meta_file_to_db.task_name 媛?
+        etl_meta_file_to_db.task_name 값
 
     task_id:
-        Airflow UI???쒖떆??task_id.
-        ?앸왂?섎㈃ task_name??洹몃?濡??ъ슜?쒕떎.
+        Airflow UI에 표시될 task_id.
+        생략하면 task_name을 그대로 사용한다.
     """
-    if airflow_task is None:
-        raise RuntimeError(
-            "create_file_to_postgres_task() requires Airflow. "
-            "Use this file as a CLI script for standalone Python execution."
-        )
-
     airflow_task_id = task_id or task_name
 
-    @airflow_task(task_id=airflow_task_id)
+    @task(task_id=airflow_task_id)
     def _static_etl_task(**context):
         run_file_to_postgres_etl(
             dag_id=dag_id,
             task_name=task_name,
             meta_postgres_conn_id=meta_postgres_conn_id,
-            today_dt=today_dt,
             **context,
         )
 
     return _static_etl_task()
-# ****** standalone 전용 ******
-def build_arg_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(
-        description="Run static file to PostgreSQL ETL without Airflow."
-    )
-    parser.add_argument("--dag-id", required=True, help="etl_meta_file_to_db.dag_id")
-    parser.add_argument("--task-name", required=True, help="etl_meta_file_to_db.task_name")
-    parser.add_argument("--today-dt", required=True, help="ETL_CALENDAR.TODAY_DT")
-    parser.add_argument(
-        "--meta-postgres-conn-id",
-        default=DEFAULT_META_POSTGRES_CONN_ID,
-        help="Metadata DB connection id. Default: postgres_conn",
-    )
-    parser.add_argument(
-        "--run-id",
-        default=None,
-        help="Optional run id for etl_job_run_dtl_hist.",
-    )
-    parser.add_argument(
-        "--task-id",
-        default=None,
-        help="Optional task id for etl_job_run_dtl_hist.",
-    )
-    parser.add_argument(
-        "--map-index",
-        type=int,
-        default=-1,
-        help="Optional map index for etl_job_run_dtl_hist.",
-    )
-    return parser
-
-
-# ****** standalone 전용 ******
-def main(argv: list[str] | None = None) -> int:
-    global USE_AIRFLOW_HOOKS
-    USE_AIRFLOW_HOOKS = False
-    args = build_arg_parser().parse_args(argv)
-    run_file_to_postgres_etl(
-        dag_id=args.dag_id,
-        task_name=args.task_name,
-        meta_postgres_conn_id=args.meta_postgres_conn_id,
-        today_dt=args.today_dt,
-        run_id=args.run_id,
-        task_id=args.task_id or args.task_name,
-        map_index=args.map_index,
-    )
-    return 0
-
-
-if __name__ == "__main__":
-    raise SystemExit(main())

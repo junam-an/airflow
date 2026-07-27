@@ -33,6 +33,7 @@ HIST_TABLE_NAME = "etl_job_run_dtl_hist"
 USE_AIRFLOW_HOOKS = True
 
 
+# ****** standalone 전용 ******
 def build_airflow_conn_env_name(conn_id: str) -> str:
     normalized = "".join(
         ch if ch.isalnum() else "_"
@@ -41,6 +42,7 @@ def build_airflow_conn_env_name(conn_id: str) -> str:
     return f"AIRFLOW_CONN_{normalized}"
 
 
+# ****** standalone 전용 ******
 def parse_postgres_conn_uri(conn_id: str, uri: str) -> dict:
     parsed = urlparse(uri)
     if parsed.scheme not in ("postgres", "postgresql"):
@@ -65,11 +67,13 @@ def parse_postgres_conn_uri(conn_id: str, uri: str) -> dict:
     return {k: v for k, v in conn_kwargs.items() if v not in (None, "")}
 
 
+# ****** standalone 전용 ******
 def get_env_value(conn_id: str, suffix: str, default: str = "") -> str:
     prefix = "".join(ch if ch.isalnum() else "_" for ch in conn_id.upper())
     return os.getenv(f"{prefix}_{suffix}", default)
 
 
+# ****** standalone 전용 ******
 def build_postgres_conn_kwargs_from_env(conn_id: str) -> dict:
     airflow_conn_uri = os.getenv(build_airflow_conn_env_name(conn_id))
     if airflow_conn_uri:
@@ -106,6 +110,7 @@ def build_postgres_conn_kwargs_from_env(conn_id: str) -> dict:
     return {k: v for k, v in kwargs.items() if v not in (None, "")}
 
 
+# ****** standalone 전용 ******
 class StandalonePostgresHook:
     def __init__(self, postgres_conn_id: str):
         self.postgres_conn_id = postgres_conn_id
@@ -140,12 +145,14 @@ class StandalonePostgresHook:
                 conn.close()
 
 
+# ****** standalone + airflow 전용 ******
 def get_postgres_hook(postgres_conn_id: str):
     if USE_AIRFLOW_HOOKS and AirflowPostgresHook is not None:
         return AirflowPostgresHook(postgres_conn_id=postgres_conn_id)
     return StandalonePostgresHook(postgres_conn_id=postgres_conn_id)
 
 
+# ****** standalone + airflow 전용 ******
 def safe_json_dumps(value) -> str:
     if value is None:
         return ""
@@ -154,6 +161,7 @@ def safe_json_dumps(value) -> str:
     return json.dumps(value, ensure_ascii=False, default=str)
 
 
+# ****** standalone + airflow 전용 ******
 def cut_text(value: str | None, max_length: int = 4000) -> str:
     if value is None:
         return ""
@@ -163,6 +171,7 @@ def cut_text(value: str | None, max_length: int = 4000) -> str:
     return text[:max_length]
 
 
+# ****** standalone + airflow 전용 ******
 def get_task_runtime_info(**context) -> dict:
     ti = context.get("ti")
     task = context.get("task")
@@ -176,6 +185,7 @@ def get_task_runtime_info(**context) -> dict:
     }
 
 
+# ****** standalone + airflow 전용 ******
 def insert_etl_run_hist(
     dag_id: str,
     run_id: str | None,
@@ -240,6 +250,7 @@ def insert_etl_run_hist(
             conn.close()
 
 
+# ****** standalone + airflow 전용 ******
 def update_etl_run_hist_success(
     run_hist_id: int,
     extract_row_count: int = 0,
@@ -276,6 +287,7 @@ def update_etl_run_hist_success(
     ))
 
 
+# ****** standalone + airflow 전용 ******
 def update_etl_run_hist_failed(
     run_hist_id: int,
     error_message: str,
@@ -314,6 +326,7 @@ def update_etl_run_hist_failed(
     ))
 
 
+# ****** standalone + airflow 전용 ******
 def parse_column_mapping(raw_mapping: str | None) -> dict[str, str]:
     if raw_mapping is None:
         return {}
@@ -397,6 +410,7 @@ def parse_column_mapping(raw_mapping: str | None) -> dict[str, str]:
     return result
 
 
+# ****** standalone + airflow 전용 ******
 def parse_input_params(raw_input_param: str | None) -> dict[str, str]:
     if raw_input_param is None:
         return {}
@@ -428,6 +442,7 @@ def parse_input_params(raw_input_param: str | None) -> dict[str, str]:
     return result
 
 
+# ****** standalone + airflow 전용 ******
 def parse_config_option(raw_config_option: str | None) -> dict[str, str]:
     if raw_config_option is None:
         return {}
@@ -461,6 +476,7 @@ def parse_config_option(raw_config_option: str | None) -> dict[str, str]:
     return result
 
 
+# ****** standalone + airflow 전용 ******
 def apply_input_params(text: str | None, input_params: dict[str, str]) -> str:
     if text is None:
         return ""
@@ -478,6 +494,7 @@ def apply_input_params(text: str | None, input_params: dict[str, str]) -> str:
     return result
 
 
+# ****** standalone + airflow 전용 ******
 def strip_outer_single_quotes(value: str) -> str:
     result = str(value).strip()
 
@@ -487,6 +504,7 @@ def strip_outer_single_quotes(value: str) -> str:
     return result.replace("'", "")
 
 
+# ****** standalone + airflow 전용 ******
 def apply_input_params_for_file(
     text: str | None,
     input_params: dict[str, str],
@@ -512,6 +530,7 @@ def apply_input_params_for_file(
     return result
 
 
+# ****** standalone + airflow 전용 ******
 def parse_encryption_columns(raw_columns: str | None) -> list[str]:
     if raw_columns is None:
         return []
@@ -527,6 +546,7 @@ def parse_encryption_columns(raw_columns: str | None) -> list[str]:
     ]
 
 
+# ****** standalone + airflow 전용 ******
 def simple_encrypt_value(value) -> str:
     if value is None:
         return ""
@@ -544,6 +564,7 @@ def simple_encrypt_value(value) -> str:
     return "ENC$" + base64.urlsafe_b64encode(encrypted).decode("ascii")
 
 
+# ****** standalone + airflow 전용 ******
 def find_column_index(columns: list[str], column_name: str) -> int | None:
     normalized_column_name = column_name.strip().lower()
     for idx, column in enumerate(columns):
@@ -552,6 +573,7 @@ def find_column_index(columns: list[str], column_name: str) -> int | None:
     return None
 
 
+# ****** standalone + airflow 전용 ******
 def resolve_encryption_column_indexes(
     source_columns: list[str],
     target_columns: list[str],
@@ -583,6 +605,7 @@ def resolve_encryption_column_indexes(
     return indexes
 
 
+# ****** standalone + airflow 전용 ******
 def encrypt_row_values(
     rows: list[tuple],
     encryption_column_indexes: list[int],
@@ -599,6 +622,7 @@ def encrypt_row_values(
 
     return encrypted_rows
 
+# ****** standalone + airflow 전용 ******
 def normalize_csv_delimiter(raw_delimiter: str | None) -> str:
     if raw_delimiter is None:
         return ","
@@ -614,6 +638,7 @@ def normalize_csv_delimiter(raw_delimiter: str | None) -> str:
     return delimiter
 
 
+# ****** standalone + airflow 전용 ******
 def normalize_file_encoding(raw_encoding: str | None) -> str:
     if raw_encoding is None:
         return "utf-8"
@@ -638,6 +663,7 @@ def normalize_file_encoding(raw_encoding: str | None) -> str:
     )
 
 
+# ****** standalone + airflow 전용 ******
 def build_limit_0_sql(source_exec_sql: str) -> str:
     return f"""
         SELECT *
@@ -648,6 +674,7 @@ def build_limit_0_sql(source_exec_sql: str) -> str:
     """
 
 
+# ****** standalone + airflow 전용 ******
 def write_csv_file(
     file_path: str,
     columns: list[str],
@@ -664,6 +691,7 @@ def write_csv_file(
         writer.writerows(rows)
 
 
+# ****** standalone + airflow 전용 ******
 def write_json_file(
     file_path: str,
     columns: list[str],
@@ -682,6 +710,7 @@ def write_json_file(
         json.dump(data, f, ensure_ascii=False, indent=2)
 
 
+# ****** standalone + airflow 전용 ******
 def write_text_file(
     file_path: str,
     columns: list[str],
@@ -703,6 +732,7 @@ def write_text_file(
             f.write("\n")
 
 
+# ****** standalone + airflow 전용 ******
 def get_single_table_config(
     dag_id: str,
     task_name: str,
@@ -931,6 +961,7 @@ def get_single_table_config(
     }
 
 
+# ****** standalone + airflow 전용 ******
 def run_postgres_to_file_etl(
     dag_id: str,
     task_name: str,
@@ -1314,6 +1345,7 @@ def run_postgres_to_file_etl(
         raise
 
 
+# ****** airflow 전용 ******
 def create_postgres_to_file_task(
     dag_id: str,
     task_name: str,
@@ -1351,6 +1383,7 @@ def create_postgres_to_file_task(
 
     return _static_etl_task()
 
+# ****** standalone 전용 ******
 def build_arg_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description="Run static PostgreSQL to file ETL without Airflow."
@@ -1382,6 +1415,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     return parser
 
 
+# ****** standalone 전용 ******
 def main(argv: list[str] | None = None) -> int:
     global USE_AIRFLOW_HOOKS
     USE_AIRFLOW_HOOKS = False
