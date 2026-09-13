@@ -1,0 +1,17 @@
+{
+  "DYNAMIC_POSTGRES_TO_FILE_ETL_META_2::TASK2": {
+    "dag_id": "DYNAMIC_POSTGRES_TO_FILE_ETL_META_2",
+    "input_param": {
+      "$$P_BASE_DT": "20260912",
+      "$$P_BASE_YM": "202609",
+      "$$P_BEF_MAX_DT": "20260831",
+      "$$P_END_DT": "20260912",
+      "$$P_END_TM": "20260913215852",
+      "$$P_MAX_DT": "20260930",
+      "$$P_START_DT": "20260901",
+      "$$P_START_TM": "20260913215450"
+    },
+    "task_name": "TASK2",
+    "updated_tm": "2026-09-13 21:58:52"
+  }
+}
