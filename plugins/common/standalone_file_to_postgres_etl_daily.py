@@ -375,6 +375,16 @@ def apply_input_params(text: str | None, input_params: dict[str, str]) -> str:
 
 
 # ****** standalone 전용 ******
+def strip_outer_single_quotes(value: str) -> str:
+    result = str(value).strip()
+
+    if len(result) >= 2 and result[0] == "'" and result[-1] == "'":
+        return result[1:-1]
+
+    return result.replace("'", "")
+
+
+# ****** standalone 전용 ******
 def normalize_csv_delimiter(raw_delimiter: str | None) -> str:
     if raw_delimiter is None:
         return ","
@@ -1297,3 +1307,4 @@ def main(argv: list[str] | None = None) -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
+
