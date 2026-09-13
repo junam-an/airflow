@@ -648,11 +648,6 @@ def build_calendar_values(today_dt: str, calendar_file: str) -> dict[str, str]:
 
 
 # ****** standalone 전용 ******
-def quote_sql_param(value: str) -> str:
-    return "'" + str(value).replace("'", "''") + "'"
-
-
-# ****** standalone 전용 ******
 def build_input_param_from_local_files(dag_id: str, task_name: str, today_dt: str | None, param_file: str, calendar_file: str, fallback_input_param: str | None) -> dict[str, str]:
     if not today_dt:
         previous = load_previous_input_param(param_file, dag_id, task_name)
@@ -666,14 +661,14 @@ def build_input_param_from_local_files(dag_id: str, task_name: str, today_dt: st
     end_tm = datetime.now().strftime("%Y%m%d%H%M%S")
     start_tm = strip_outer_single_quotes(previous.get("$$P_END_TM") or fallback.get("$$P_END_TM") or "")
     input_param = {
-        "$$P_BASE_DT": quote_sql_param(calendar_values.get("P_BASE_DT", "")),
-        "$$P_START_DT": quote_sql_param(calendar_values.get("P_START_DT", "")),
-        "$$P_END_DT": quote_sql_param(calendar_values.get("P_END_DT", "")),
-        "$$P_START_TM": quote_sql_param(start_tm),
-        "$$P_END_TM": quote_sql_param(end_tm),
-        "$$P_BEF_MAX_DT": quote_sql_param(calendar_values.get("P_BEF_MAX_DT", "")),
-        "$$P_MAX_DT": quote_sql_param(calendar_values.get("P_MAX_DT", "")),
-        "$$P_BASE_YM": quote_sql_param(calendar_values.get("P_BASE_YM", "")),
+        "$$P_BASE_DT": calendar_values.get("P_BASE_DT", ""),
+        "$$P_START_DT": calendar_values.get("P_START_DT", ""),
+        "$$P_END_DT": calendar_values.get("P_END_DT", ""),
+        "$$P_START_TM": start_tm,
+        "$$P_END_TM": end_tm,
+        "$$P_BEF_MAX_DT": calendar_values.get("P_BEF_MAX_DT", ""),
+        "$$P_MAX_DT": calendar_values.get("P_MAX_DT", ""),
+        "$$P_BASE_YM": calendar_values.get("P_BASE_YM", ""),
     }
     save_current_input_param(param_file, dag_id, task_name, input_param)
     return input_param
@@ -1222,4 +1217,5 @@ def main(argv: list[str] | None = None) -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
+
 
