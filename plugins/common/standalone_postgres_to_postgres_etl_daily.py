@@ -22,6 +22,7 @@ DEFAULT_CALENDAR_FILE = "etl_calendar.csv"
 DEFAULT_LOG_FILE = "logs/etl_run_log.jsonl"
 DEFAULT_SOURCE_CONN_ID = "postgres_conn"
 DEFAULT_TARGET_CONN_ID = "postgres_conn"
+
 CHUNK_SIZE = 5000
 
 
@@ -350,6 +351,16 @@ def apply_input_params(sql_text: str | None, input_params: dict[str, str]) -> st
         result = result.replace(key, input_params[key])
 
     return result
+
+
+# ****** standalone 전용 ******
+def strip_outer_single_quotes(value: str) -> str:
+    result = str(value).strip()
+
+    if len(result) >= 2 and result[0] == "'" and result[-1] == "'":
+        return result[1:-1]
+
+    return result.replace("'", "")
 
 
 # ****** standalone 전용 ******
